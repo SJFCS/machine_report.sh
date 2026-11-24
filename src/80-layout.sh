@@ -41,7 +41,7 @@ ensure_data_width() {
 # ── 表格绘制 ───────────────────────────────────────────────────────────
 
 # [TABLE] print_divider LEFT MIDDLE RIGHT [CHAR] -> 两列之间的横线。
-# 名字列和数据列各加一格内边距，宽度与 print_row 一致。
+# 名字列和数据列各加一格内边距，宽度与字段行一致。
 # 用法：print_divider "$MID_LEFT" "$MID_MID" "$MID_RIGHT"
 print_divider() {
     local left=$1 middle=$2 right=$3
@@ -78,57 +78,54 @@ print_merged_divider() {
         "$right"
 }
 
-# [TABLE] print_centered TEXT -> 跨两列居中输出一行。
-# TEXT 可以含 ANSI；宽度计算会忽略控制码。
-# 用法：print_centered "${C_TITLE}${title}${C_RESET}"
-print_centered() {
-    local text fitted inner width left right
-    inner=$((NAME_W + DATA_W + 5))  # 左右边框之间的显示列数
-    fitted=$(fit_display "$1" "$inner")
-    width=$(display_width "$fitted")
-    left=$(((inner - width) / 2))
-    right=$((inner - width - left))
-    printf '│%*s%s%*s│\n' "$left" '' "$fitted" "$right" ''
-}
+# [TABLE] _format_report_lines TEXT... -> 一次 Perl 输出全部渲染行。
+# 记录以 NUL 分隔，开头 C 表示居中行、R 表示字段行。这样标题区和表格
+# 共用一次 Perl 启动，同时分隔线仍由 Bash 控制。
+_format_report_lines() {
+    local inner=$((NAME_W + DATA_W + 5))
+    local center_count=$#
+    local row_count=${#FIELD_LABELS[@]}
 
-# [TABLE] print_row LABEL VALUE -> 输出一条完整的两列表格行。
-#   * 名字和值都先按显示宽度截断，保证永远不会顶破右边界；
-#   * 再按显示宽度补空格，因此中文、ANSI 颜色、图标混排都能对齐；
-#   * 原始 FIELD_VALUES 不会被修改，截断只影响这一行的显示内容。
-# 用法：print_row 'OS' 'Ubuntu 24.04'
-print_row() {
-    local name data
-    name=$(fit_display "$1" "$NAME_W")
-    data=$(fit_display "$2" "$DATA_W")
-    printf '│ %s │ %s │\n' \
-        "$(pad_display "$name" "$NAME_W")" \
-        "$(pad_display "$data" "$DATA_W")"
+    printf '%s\0' "$@" "${FIELD_LABELS[@]}" "${FIELD_VALUES[@]}" |
+        TABLE_MODE=render-report \
+            TABLE_INNER="$inner" \
+            TABLE_CENTER_COUNT="$center_count" \
+            TABLE_ROWS="$row_count" \
+            TABLE_NAME_W="$NAME_W" \
+            TABLE_DATA_W="$DATA_W" \
+            perl -CS -e "$DISPLAY_WIDTH_PERL"
 }
 
 # [TABLE] bar USED TOTAL [WIDTH] -> 无颜色横向百分比条。
 # 条形字符本身都是单列字符，所以这里可以直接用 repeat_char()；
-# 百分比和块数交给 awk 计算，避免 Bash 只支持整数算术造成精度问题。
+# 普通十进制先转成定点整数计算块数；异常输入才回退 awk。
 # 省略 WIDTH 时使用 DATA_W。
 # 用法：graph=$(bar 42.5 100 20)
 bar() {
     local used=${1-0} total=${2-0} width=${3:-${DATA_W:-0}}
-    local percent blocks
+    local blocks scaled_used scaled_total
 
     is_number "$used" || used=0
     is_number "$total" || total=0
     [[ $width =~ ^[0-9]+$ ]] || width=0
 
-    percent=$(awk -v u="$used" -v t="$total" 'BEGIN {
-        if (t <= 0) { print "0"; exit }
-        printf "%.2f", (u / t) * 100
-    }')
-
-    blocks=$(awk -v p="$percent" -v w="$width" 'BEGIN {
-        n = int((p / 100) * w)
-        if (n < 0) n = 0
-        if (n > w) n = w
-        print n
-    }')
+    if _number_to_scaled_into scaled_used "$used" 6 &&
+        _number_to_scaled_into scaled_total "$total" 6; then
+        if (( scaled_total <= 0 || width <= 0 || scaled_used <= 0 )); then
+            blocks=0
+        else
+            blocks=$(((scaled_used * width) / scaled_total))
+            (( blocks > width )) && blocks=$width
+        fi
+    else
+        blocks=$(awk -v u="$used" -v t="$total" -v w="$width" 'BEGIN {
+            if (t <= 0 || w <= 0) { print 0; exit }
+            n = int(((u / t) * 100 / 100) * w)
+            if (n < 0) n = 0
+            if (n > w) n = w
+            print n
+        }')
+    fi
 
     printf '%s%s' \
         "$(repeat_char '█' "$blocks")" \

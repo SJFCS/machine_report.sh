@@ -70,11 +70,11 @@ detect_os_name() {
 cpu_frequency_text() {
     local min_mhz=${1:-0} max_mhz=${2:-0} min_ghz max_ghz
     if (( min_mhz > 0 && max_mhz > 0 )); then
-        min_ghz=$(awk -v m="$min_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
-        max_ghz=$(awk -v m="$max_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
+        _mhz_to_ghz_into min_ghz "$min_mhz"
+        _mhz_to_ghz_into max_ghz "$max_mhz"
         printf '%s–%s GHz' "$min_ghz" "$max_ghz"
     elif (( max_mhz > 0 )); then
-        max_ghz=$(awk -v m="$max_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
+        _mhz_to_ghz_into max_ghz "$max_mhz"
         printf 'MAX %s GHz' "$max_ghz"
     else
         printf '%s' '-'
@@ -85,6 +85,7 @@ cpu_frequency_text() {
 collect_cpu_scalars() {
     local model='' sockets_text='' cores_text='' min_text='' max_text=''
     local sockets=1 total_cores=1 min_mhz=0 max_mhz=0 frequency='-' i
+    local key value cores_per_socket=0
 
     if [ "$platform_name" = Darwin ]; then
         model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
@@ -92,46 +93,28 @@ collect_cpu_scalars() {
         total_cores=$(sysctl -n hw.ncpu 2>/dev/null)
     else
         if command -v lscpu >/dev/null 2>&1; then
-            IFS=$'\t' read -r model sockets_text cores_text min_text max_text < <(
-                LC_ALL=C lscpu 2>/dev/null | awk -F: '
-                    /^[[:space:]]*Model name/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        model = v
-                    }
-                    /^[[:space:]]*Socket\(s\)/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        sockets = v
-                    }
-                    /^[[:space:]]*Core\(s\) per socket/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        cores = v
-                    }
-                    /^[[:space:]]*CPU min MHz/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        min_mhz = v
-                    }
-                    /^[[:space:]]*CPU max MHz/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        max_mhz = v
-                    }
-                    END {
-                        printf "%s\t%s\t%s\t%s\t%s\n",
-                            model, sockets, cores, min_mhz, max_mhz
-                    }
-                '
-            )
+            lscpu_output=$(LC_ALL=C lscpu 2>/dev/null)
+            while IFS=: read -r key value; do
+                key=${key//[[:space:]]/}
+                value=${value#"${value%%[![:space:]]*}"}
+                value=${value%"${value##*[![:space:]]}"}
+                case $key in
+                    Modelname) model=$value ;;
+                    'Socket(s)') sockets_text=$value ;;
+                    'Core(s)persocket') cores_text=$value ;;
+                    CPUminMHz) min_text=$value ;;
+                    CPUmaxMHz) max_text=$value ;;
+                esac
+            done <<<"$lscpu_output"
         fi
         if [ -z "$model" ] && [ -r /proc/cpuinfo ]; then
-            model=$(awk -F: '/^[[:space:]]*model name/ {
-                sub(/^[ \t]+/, "", $2)
-                print $2
-                exit
-            }' /proc/cpuinfo 2>/dev/null)
+            while IFS=: read -r key value; do
+                key=${key//[[:space:]]/}
+                if [[ $key == modelname ]]; then
+                    model=${value#"${value%%[![:space:]]*}"}
+                    break
+                fi
+            done < /proc/cpuinfo
         fi
         total_cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null)
         [ -n "$total_cores" ] || total_cores=$(nproc 2>/dev/null)
@@ -139,18 +122,17 @@ collect_cpu_scalars() {
 
     [ -n "$model" ] || model='UNKNOWN'
     model=${model//$'\t'/ }
-    sockets=$(awk -v v="$sockets_text" 'BEGIN { printf "%d", v + 0 }')
+    sockets=0
+    _number_integer_into sockets "$sockets_text"
     (( sockets > 0 )) || sockets=1
-    total_cores=$(awk -v v="$total_cores" 'BEGIN { printf "%d", v + 0 }')
+    _number_integer_into total_cores "$total_cores"
     if (( total_cores <= 0 )); then
-        local cores_per_socket
-        cores_per_socket=$(awk -v v="$cores_text" \
-            'BEGIN { printf "%d", v + 0 }')
+        _number_integer_into cores_per_socket "$cores_text"
         (( cores_per_socket > 0 )) || cores_per_socket=1
         total_cores=$((sockets * cores_per_socket))
     fi
-    min_mhz=$(awk -v v="$min_text" 'BEGIN { printf "%d", v + 0 }')
-    max_mhz=$(awk -v v="$max_text" 'BEGIN { printf "%d", v + 0 }')
+    _number_integer_into min_mhz "$min_text"
+    _number_integer_into max_mhz "$max_text"
     frequency=$(cpu_frequency_text "$min_mhz" "$max_mhz")
 
     cpu_models=()
@@ -170,7 +152,9 @@ collect_load_averages() {
     if [ "$platform_name" = Darwin ]; then
         values=$(sysctl -n vm.loadavg 2>/dev/null)
     elif [ -r /proc/loadavg ]; then
-        values=$(awk '{ print $1, $2, $3 }' /proc/loadavg 2>/dev/null)
+        read -r load1 load5 load15 values < /proc/loadavg || true
+        [ -n "${load1:-}" ] && [ -n "${load5:-}" ] && [ -n "${load15:-}" ] &&
+            return
     fi
     if [ -z "$values" ]; then
         values=$(uptime 2>/dev/null |
@@ -188,8 +172,10 @@ collect_load_averages() {
 # [HANDLER] collect_uptime -> 人类可读的系统运行时间。
 collect_uptime() {
     local seconds=0 boot=''
+    local days hours minutes
     if [ -r /proc/uptime ]; then
-        seconds=$(awk '{ printf "%d", $1 }' /proc/uptime 2>/dev/null)
+        read -r seconds boot < /proc/uptime || true
+        seconds=${seconds%%.*}
     elif [ "$platform_name" = Darwin ]; then
         boot=$(sysctl -n kern.boottime 2>/dev/null |
             sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
@@ -198,14 +184,16 @@ collect_uptime() {
         fi
     fi
     if (( seconds > 0 )); then
-        uptime=$(awk -v s="$seconds" 'BEGIN {
-            d = int(s / 86400)
-            h = int((s % 86400) / 3600)
-            m = int((s % 3600) / 60)
-            if (d > 0) printf "%dd %dh %dm", d, h, m
-            else if (h > 0) printf "%dh %dm", h, m
-            else printf "%dm", m
-        }')
+        days=$((seconds / 86400))
+        hours=$(((seconds % 86400) / 3600))
+        minutes=$(((seconds % 3600) / 60))
+        if (( days > 0 )); then
+            printf -v uptime '%dd %dh %dm' "$days" "$hours" "$minutes"
+        elif (( hours > 0 )); then
+            printf -v uptime '%dh %dm' "$hours" "$minutes"
+        else
+            printf -v uptime '%dm' "$minutes"
+        fi
     else
         uptime='UNKNOWN'
     fi
@@ -215,27 +203,26 @@ collect_uptime() {
 collect_memory_scalars() {
     local total_kb=0 used_kb=0 cache_kb=0 free_kb=0 shared_kb=0 avail_kb=0
     local total_bytes=0
+    local buffers_kb=0 cached_kb=0 key value
 
     if [ -r /proc/meminfo ]; then
-        read -r total_kb used_kb cache_kb free_kb shared_kb avail_kb < <(
-            awk '
-                /^MemTotal:/ { total = $2 }
-                /^MemFree:/ { free = $2 }
-                /^MemAvailable:/ { avail = $2 }
-                /^Buffers:/ { buffers = $2 }
-                /^Cached:/ { cached = $2 }
-                /^Shmem:/ { shared = $2 }
-                END {
-                    cache = buffers + cached
-                    if (avail == "") avail = free + cache
-                    used = total - free - cache
-                    if (used < 0) used = 0
-                    if (used > total) used = total
-                    printf "%.0f %.0f %.0f %.0f %.0f %.0f\n",
-                        total, used, cache, free, shared, avail
-                }
-            ' /proc/meminfo 2>/dev/null
-        )
+        while IFS=: read -r key value; do
+            value=${value//[[:space:]]/}
+            value=${value%kB}
+            case $key in
+                MemTotal) total_kb=$value ;;
+                MemFree) free_kb=$value ;;
+                MemAvailable) avail_kb=$value ;;
+                Buffers) buffers_kb=$value ;;
+                Cached) cached_kb=$value ;;
+                Shmem) shared_kb=$value ;;
+            esac
+        done < /proc/meminfo
+        cache_kb=$((buffers_kb + cached_kb))
+        (( avail_kb > 0 )) || avail_kb=$((free_kb + cache_kb))
+        used_kb=$((total_kb - free_kb - cache_kb))
+        (( used_kb < 0 )) && used_kb=0
+        (( used_kb > total_kb )) && used_kb=$total_kb
     elif [ "$platform_name" = Darwin ] &&
         command -v vm_stat >/dev/null 2>&1; then
         total_bytes=$(sysctl -n hw.memsize 2>/dev/null)
@@ -263,31 +250,43 @@ collect_memory_scalars() {
         )
     fi
 
-    mem_total=$(awk -v kb="$total_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_used=$(awk -v kb="$used_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_cache=$(awk -v kb="$cache_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_free=$(awk -v kb="$free_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_shared=$(awk -v kb="$shared_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_available=$(awk -v kb="$avail_kb" \
-        'BEGIN { printf "%.1f", kb / 1048576 }')
+    _ratio_to_fixed_into mem_total "$total_kb" 1048576 1
+    _ratio_to_fixed_into mem_used "$used_kb" 1048576 1
+    _ratio_to_fixed_into mem_cache "$cache_kb" 1048576 1
+    _ratio_to_fixed_into mem_free "$free_kb" 1048576 1
+    _ratio_to_fixed_into mem_shared "$shared_kb" 1048576 1
+    _ratio_to_fixed_into mem_available "$avail_kb" 1048576 1
 }
 
 # [HANDLER] collect_real_scalars -> 关闭 mock 时的完整真实标量数据。
 collect_real_scalars() {
+    _profile_begin 'os'
     os_name=$(detect_os_name)
+    _profile_end
+    _profile_begin 'cpu'
     collect_cpu_scalars
+    _profile_end
+    _profile_begin 'load'
     collect_load_averages
+    _profile_end
+    _profile_begin 'uptime'
     collect_uptime
+    _profile_end
+    _profile_begin 'memory'
     collect_memory_scalars
+    _profile_end
 }
 
 if (( REPORT_MOCK_ENABLED == 1 )); then
+    _profile_begin 'mock scalars'
     load_mock_scalars
+    _profile_end
 else
     collect_real_scalars
 fi
 
 # 内核版本始终使用真实值；mock 只影响上方演示指标。
+_profile_begin 'metadata'
 kernel_version=$(uname -r 2>/dev/null)
 [ -n "$kernel_version" ] || kernel_version=unknown
 kernel_summary="${platform_name} ${kernel_version} · ${server_arch}"
@@ -300,4 +299,5 @@ full_hostname=$(hostname -f 2>/dev/null)
 
 cpu_model_width=$(max_display_width "${cpu_models[@]}")
 cores="${cpu_cores} vCPU(s) / ${cpu_sockets} Socket(s)"
+_profile_end
 

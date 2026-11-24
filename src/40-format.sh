@@ -31,10 +31,28 @@ nonfinite_as_dash() {
 #   available 与 free/buff-cache 有重叠
 # 因此后面几项的百分比不会全部相加为 100%，这是指标定义不同，不是算错。
 percent_of() {
-    local value=${1-} total=${2-} result
+    local value=${1-} total=${2-} result sign=''
+    local scaled_value scaled_total tenths
     if ! is_number "$value" || ! is_number "$total"; then
         printf '%s' '-'
         return 0
+    fi
+    if _number_to_scaled_into scaled_value "$value" 6 &&
+        _number_to_scaled_into scaled_total "$total" 6; then
+        if (( scaled_total <= 0 )); then
+            printf '%s' '-'
+            return 0
+        fi
+        if (( scaled_value < 0 )); then
+            sign='-'
+            scaled_value=$((-scaled_value))
+        fi
+        if (( scaled_value <= 8000000000000000 )); then
+            tenths=$(((scaled_value * 1000 + scaled_total / 2) / scaled_total))
+            _scaled_to_fixed_into result "$tenths" 1
+            printf '%s%s' "$sign" "$result"
+            return 0
+        fi
     fi
     result=$(awk -v v="$value" -v t="$total" 'BEGIN {
         if (t <= 0) { print "-"; exit }
@@ -47,9 +65,26 @@ percent_of() {
 # BYTES 必须是有限的非负数，否则返回 "-"。
 # 用法：size=$(human_bytes 1992294400)
 human_bytes() {
-    local bytes=${1-} result
+    local bytes=${1-} result unit=0 divisor=1
+    local -a units=('B' 'K' 'M' 'G' 'T' 'P')
     if ! is_number "$bytes" || [[ $bytes == -* ]]; then
         printf '%s' '-'
+        return 0
+    fi
+    if [[ $bytes =~ ^[0-9]+$ ]]; then
+        while (( unit < 5 && bytes >= divisor * 1024 )); do
+            divisor=$((divisor * 1024))
+            unit=$((unit + 1))
+        done
+        if (( unit == 0 )); then
+            printf '%sB' "$bytes"
+        elif (( bytes < divisor * 10 )); then
+            _ratio_to_fixed_into result "$bytes" "$divisor" 1
+            printf '%s%s' "$result" "${units[unit]}"
+        else
+            _ratio_to_fixed_into result "$bytes" "$divisor" 0
+            printf '%s%s' "$result" "${units[unit]}"
+        fi
         return 0
     fi
     result=$(awk -v b="$bytes" 'BEGIN {
@@ -95,13 +130,16 @@ format_percent_suffix() {
 # MIB 必须是有限的非负数，否则返回 "-"。
 # 用法：gib=$(format_mib_as_gib 81920)
 format_mib_as_gib() {
-    local mib=${1-} result
+    local mib=${1-} result scaled_mib
     if ! is_number "$mib" || [[ $mib == -* ]]; then
         printf '%s' '-'
         return 0
     fi
-    result=$(awk -v m="$mib" 'BEGIN { printf "%.1f", m / 1024 }' 2>/dev/null) ||
-        result='-'
-    nonfinite_as_dash "$result"
+    if _number_to_scaled_into scaled_mib "$mib" 3; then
+        _ratio_to_fixed_into result "$scaled_mib" 1024000 1
+        printf '%s' "$result"
+        return 0
+    fi
+    printf '%s' '-'
 }
 

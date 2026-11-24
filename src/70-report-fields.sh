@@ -14,6 +14,7 @@ add_field 'SYSTEM UUID' "$system_uuid"
 add_field 'UPTIME'      "$uptime"
 add_field 'HOSTNAME'    "$hostname"     1
 primary_ip=''
+_profile_begin 'network'
 while IFS=$'\t' read -r nic_name nic_ip; do
     [ -n "$nic_name" ] || continue
     [ -n "$primary_ip" ] || primary_ip=$nic_ip
@@ -23,6 +24,7 @@ if [ -z "$primary_ip" ]; then
     add_field 'NIC' '-'
     primary_ip='UNKNOWN'
 fi
+_profile_end
 server_display="${C_K}SERVER${C_RESET} ${C_V}${login_user}@${hostname}·${primary_ip}${C_RESET}"
 client_display="${C_MUTED}CLIENT ${login_client}${C_RESET}"
 for i in "${!cpu_models[@]}"; do
@@ -45,6 +47,7 @@ GPU_MEM_ROWS=()
 GPU_UTIL_ROWS=()
 GPU_IDENTITY_LINES=()
 gpu_index=0
+_profile_begin 'gpu'
 while IFS=$'\t' read -r gpu_name gpu_total gpu_used gpu_util \
     gpu_min_mhz gpu_max_mhz; do
     [ -n "$gpu_name" ] || continue
@@ -67,6 +70,7 @@ done < <(collect_gpu_rows)
 if [ "${#GPU_RECORDS[@]}" -eq 0 ]; then
     add_field 'GPU' '-' 1
 fi
+_profile_end
 
 # 内存区：TOTAL 带健康状态，其余行在第二轮补百分比。
 add_field 'MEM TOTAL'   "$total_display" 1
@@ -90,6 +94,8 @@ DISK_BAR_PCTS=()
 DISK_DEVICE_ROWS=()
 DISK_SPACE_ROWS=()
 DISK_MOUNTS=()
+DISK_PCTS=()
+_profile_begin 'disk collect'
 while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
     disk_pct disk_used disk_avail disk_format; do
     [ -n "$disk_name" ] || continue
@@ -100,8 +106,9 @@ while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
         "TOTAL $disk_size"$'\t'"USED $disk_used"$'\t'"AVAIL $disk_avail"
     )
     DISK_MOUNTS+=("${disk_mounts//,/, }")
-    DISK_BAR_PCTS+=("$disk_pct")
+    DISK_PCTS+=("$disk_pct")
 done < <(physical_disk_rows)
+_profile_end
 
 # [TABLE] format_disk_columns C1 C2 C3 -> 使用 DISK_COL*_W 补齐后拼接。
 # 用法：line=$(format_disk_columns "DISK $name" "TYPE $media" "FORMAT $fmt")
@@ -114,6 +121,7 @@ format_disk_columns() {
 
 # 三列宽度由 DEVICE 和 SPACE 两类记录共同决定，保证上下两行用同一组
 # 分隔符位置。记录内部使用 TAB，因此挂载点或型号中的空格不会干扰分列。
+_profile_begin 'disk layout'
 if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
     DISK_COL1_W=$(max_tsv_column_width 0 \
         "${DISK_DEVICE_ROWS[@]}" "${DISK_SPACE_ROWS[@]}")
@@ -133,9 +141,10 @@ if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
             "$(color_kv_segments "$dev_line")" "$disk_break"
         add_field 'SPACE' \
             "$(color_kv_segments "$space_line")"
-        if is_number "${DISK_BAR_PCTS[i]}"; then
+        if is_number "${DISK_PCTS[i]}"; then
             add_field 'DISK USAGE' ''
             DISK_BAR_ROWS+=("$FIELD_INDEX")
+            DISK_BAR_PCTS+=("${DISK_PCTS[i]}")
         else
             add_field 'DISK USAGE' '-'
         fi
@@ -148,4 +157,5 @@ else
         "$(color_kv_segments 'TOTAL - · USED - · AVAIL -')"
     add_field 'MOUNTS' '-'
 fi
+_profile_end
 

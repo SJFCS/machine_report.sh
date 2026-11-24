@@ -9,11 +9,12 @@
 #
 # 本脚本的约定：
 #   1. 所有可能含中文、ANSI 或图标的宽度、补齐、居中、截断都经过
-#      display_width() / fit_display()；只有纯 ASCII 的数字后缀才直接用 ${#}。
+#      display_width() / fit_display()。单列文本走 Bash 快路径，复杂
+#      Unicode 文本走批量 Perl。
 #   2. Perl 自带 Unicode 属性匹配，用 East_Asian_Width 和
 #      General_Category 判断宽字符、组合符；无需安装 CPAN 包。
 #   3. ANSI CSI/OSC 序列占 0 列；私有区字符（Nerd Font）按 1 列处理。
-#   4. 单元格只支持单行。超宽内容显示为“…”并保留原始数据，不会撑破边框。
+#   4. 单元格只支持单行。超宽内容显示“…”并保留原始数据，不会撑破边框。
 #
 # ── 怎样增加字段 ────────────────────────────────────────────────────────
 # 按显示顺序调用 add_field 即可，三个底层数组会由函数自动同步：
@@ -29,8 +30,12 @@
 # 如果新增的字段名比现有列宽更长，可以调整 NAME_MIN / NAME_MAX；如果数据
 # 普遍更长，可以调整 DATA_MIN / DATA_MAX。无需修改任何画线函数。
 #
-# 依赖：Bash、Perl 5、awk。适用于 macOS/Linux。
+# 依赖：Bash、awk、Perl 5。适用于 macOS/Linux。
 # 颜色：终端里自动启用；设置 NO_COLOR=1 可关闭，FORCE_COLOR=1 可强制启用。
+# 性能：设置 REPORT_PROFILE=1 后，各采集与渲染阶段的耗时写入 stderr。
+# GPU：REPORT_GPU_ENABLED=0 跳过采集；REPORT_GPU_TIMEOUT 控制 nvidia-smi
+#      发出终止信号的秒数（默认 1，设为 0 表示不限制）。驱动处于不可中断
+#      等待时，信号也可能延迟生效；需要稳定速度时应直接跳过 GPU。
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
 #       REPORT_MOCK 作为兼容别名，外部传入 REPORT_MOCK_ENABLED 时优先。
 #
@@ -69,10 +74,10 @@
 #   max_display_width / max_tsv_column_width
 #   add_field / measure_fields / ensure_centered_width / ensure_data_width
 #   print_divider / print_dashed_divider / print_header
-#   print_merged_divider / print_centered / print_row
+#   print_merged_divider / _format_report_lines
 #   bar / percent_bar_display / disk_usage_display
 #   gpu_memory_display / gpu_util_display / load_display / stacked_bar
-#   用法：add_field 'LABEL' 'VALUE'；measure_fields；print_row LABEL VALUE。
+#   用法：add_field 'LABEL' 'VALUE'；measure_fields；render_report。
 #   TABLE 层只消费已完成的数据，不应调用 lsblk、nvidia-smi 或 dmidecode。
 #
 # [REPORT] 字段组装与输出
@@ -81,6 +86,7 @@
 
 set -u
 # REPORT_MOCK_ENABLED=1
+# REPORT_PROFILE=1
 # NO_COLOR=1
 
 # mock 默认关闭；兼容旧的 REPORT_MOCK 变量，并在入口处拒绝非法开关值。
@@ -94,6 +100,82 @@ case $report_mock_setting in
         exit 2
         ;;
 esac
+
+report_profile_setting=${REPORT_PROFILE:-0}
+case $report_profile_setting in
+    1|true|TRUE|yes|YES|on|ON) REPORT_PROFILE=1 ;;
+    0|false|FALSE|no|NO|off|OFF) REPORT_PROFILE=0 ;;
+    *)
+        printf '%s\n' \
+            "REPORT_PROFILE 只能是 0/1（也支持 true/false/on/off）：$report_profile_setting" >&2
+        exit 2
+        ;;
+esac
+
+report_gpu_setting=${REPORT_GPU_ENABLED:-1}
+case $report_gpu_setting in
+    1|true|TRUE|yes|YES|on|ON) REPORT_GPU_ENABLED=1 ;;
+    0|false|FALSE|no|NO|off|OFF) REPORT_GPU_ENABLED=0 ;;
+    *)
+        printf '%s\n' \
+            "REPORT_GPU_ENABLED 只能是 0/1（也支持 true/false/on/off）：$report_gpu_setting" >&2
+        exit 2
+        ;;
+esac
+
+report_gpu_timeout=${REPORT_GPU_TIMEOUT:-1}
+if ! [[ $report_gpu_timeout =~ ^[0-9]+$ ]]; then
+    printf '%s\n' \
+        "REPORT_GPU_TIMEOUT 必须是非负整数秒：$report_gpu_timeout" >&2
+    exit 2
+fi
+REPORT_GPU_TIMEOUT=$((10#$report_gpu_timeout))
+
+_profile_now_into() {
+    local __var=$1 now=${EPOCHREALTIME:-}
+    if [ -n "$now" ]; then
+        printf -v "$__var" '%s' "${now/./}"
+    else
+        printf -v "$__var" '%s' "$(
+            perl -MTime::HiRes=time -e 'printf "%.0f", time * 1_000_000'
+        )"
+    fi
+}
+
+if (( REPORT_PROFILE == 1 )); then
+    _profile_begin() {
+        REPORT_PROFILE_STAGE_LABEL=$1
+        _profile_now_into REPORT_PROFILE_STAGE_START_US
+    }
+
+    _profile_end() {
+        local now_us elapsed_us
+        _profile_now_into now_us
+        elapsed_us=$((now_us - REPORT_PROFILE_STAGE_START_US))
+        (( elapsed_us >= 0 )) || elapsed_us=0
+        printf 'REPORT_PROFILE %-20s %6d.%03d ms\n' \
+            "$REPORT_PROFILE_STAGE_LABEL" \
+            "$((elapsed_us / 1000))" \
+            "$((elapsed_us % 1000))" >&2
+    }
+
+    _profile_total() {
+        local now_us elapsed_us
+        _profile_now_into now_us
+        elapsed_us=$((now_us - REPORT_PROFILE_SCRIPT_START_US))
+        (( elapsed_us >= 0 )) || elapsed_us=0
+        printf 'REPORT_PROFILE %-20s %6d.%03d ms\n' \
+            'total' \
+            "$((elapsed_us / 1000))" \
+            "$((elapsed_us % 1000))" >&2
+    }
+
+    _profile_now_into REPORT_PROFILE_SCRIPT_START_US
+else
+    _profile_begin() { :; }
+    _profile_end() { :; }
+    _profile_total() { :; }
+fi
 
 # 左列和右列的最小/最大宽度，单位都是“terminal display columns”。
 # NAME_MAX 用来防止某个异常长的字段名把整张表撑得太宽；超长字段名会被截断。

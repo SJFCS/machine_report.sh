@@ -5,12 +5,15 @@
 
 # 先测量纯数据，再生成与 DATA_W 等宽的条形图，填入对应的值槽位。
 # 用 add_field 时记录下来的下标定位，不写死 6/8/10，后续增删字段更安全。
+_profile_begin 'layout measure'
 measure_fields
 for gpu_identity in "${GPU_IDENTITY_LINES[@]}"; do
     ensure_data_width "$gpu_identity"
 done
 ensure_centered_width "$server_display"
 ensure_centered_width "$client_display"
+_profile_end
+_profile_begin 'format values'
 FIELD_VALUES[MEM_USED_ROW]=$(align_mem_percent \
     "$used_display" "$mem_used_percent" "$C_BAR_USED")
 FIELD_VALUES[MEM_CACHE_ROW]=$(align_mem_percent \
@@ -45,6 +48,7 @@ FIELD_VALUES[MEM_BAR_ROW]=$(
 FIELD_VALUES[MEM_BAR_ROW]+=$MEM_PERCENT_SUFFIX
 
 FIELD_VALUES[MEM_TOTAL_ROW]=$(align_row_ends "$total_display" "$mem_status")
+_profile_end
 
 # ── [REPORT] 最终渲染 ──────────────────────────────────────────────────
 
@@ -55,10 +59,29 @@ render_report() {
     local title='服务器运行报告'
     local subtitle='效能组·Devops Platform Service'
     local environment='PRODUCTION'
+    local line
+    local -a centered_lines=()
+    local -a field_lines=()
+    local -a centered_texts=()
+
+    centered_texts=(
+        "${C_TITLE}${title}${C_RESET}"
+        "${C_ACCENT}${subtitle}${C_RESET}"
+        "${C_ENV}ENVIRONMENT · ${environment}${C_RESET}"
+        "$server_display"
+        "$client_display"
+    )
+
+    # 标题、页脚和所有字段行合并到一个 Perl 进程。
+    while IFS= read -r -d '' line; do
+        case ${line:0:1} in
+            C) centered_lines+=("${line:1}") ;;
+            R) field_lines+=("${line:1}") ;;
+        esac
+    done < <(_format_report_lines "${centered_texts[@]}")
 
     print_header
-    print_centered "${C_TITLE}${title}${C_RESET}"
-    print_centered "${C_ACCENT}${subtitle}${C_RESET}"
+    printf '%s\n' "${centered_lines[0]}" "${centered_lines[1]}"
     print_divider "$MID_LEFT" "$TOP_MID" "$MID_RIGHT"
 
     for i in "${!FIELD_LABELS[@]}"; do
@@ -68,15 +91,19 @@ render_report() {
                 2) print_dashed_divider ;;
             esac
         fi
-        print_row "${FIELD_LABELS[i]}" "${FIELD_VALUES[i]}"
+        printf '%s\n' "${field_lines[i]}"
     done
 
     # 页脚跨两列：上方竖线用 ┴ 结束，底边使用连续横线。
     print_divider "$MID_LEFT" "$BOTTOM_MID" "$MID_RIGHT"
-    print_centered "${C_ENV}ENVIRONMENT · ${environment}${C_RESET}"
-    print_centered "$server_display"
-    print_centered "$client_display"
+    printf '%s\n' \
+        "${centered_lines[2]}" \
+        "${centered_lines[3]}" \
+        "${centered_lines[4]}"
     print_merged_divider "$BOTTOM_LEFT" "$BOTTOM_RIGHT"
 }
 
+_profile_begin 'render'
 render_report
+_profile_end
+_profile_total

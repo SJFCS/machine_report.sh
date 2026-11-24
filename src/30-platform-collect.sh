@@ -52,7 +52,7 @@ detect_product_name() {
 # 无法识别时沿用 BARE METAL 回退值，不等同于已确认是裸机。
 # 用法：virt=$(detect_virtualization)
 detect_virtualization() {
-    local virt vendor manufacturer product
+    local virt='' vendor='' manufacturer='' product=''
 
     if command -v systemd-detect-virt >/dev/null 2>&1; then
         virt=$(systemd-detect-virt 2>/dev/null)
@@ -62,14 +62,16 @@ detect_virtualization() {
         esac
     fi
 
-    if command -v lscpu >/dev/null 2>&1; then
-        vendor=$(lscpu 2>/dev/null | awk -F: '
-            /Hypervisor vendor/ {
-                gsub(/^[ \t]+/, "", $2)
-                print $2
-                exit
-            }
-        ')
+    if [ -n "${lscpu_output:-}" ]; then
+        local key value
+        while IFS=: read -r key value; do
+            key=${key//[[:space:]]/}
+            if [[ $key == Hypervisorvendor ]]; then
+                vendor=${value#"${value%%[![:space:]]*}"}
+                vendor=${vendor%"${vendor##*[![:space:]]}"}
+                break
+            fi
+        done <<<"$lscpu_output"
         if [ -n "$vendor" ]; then
             printf '%s' "$vendor" | tr '[:lower:]' '[:upper:]'
             return
@@ -150,7 +152,7 @@ detect_timezone() {
 # 用法：user=$(detect_login_user)
 detect_login_user() {
     local user
-    user=$(who am i 2>/dev/null | awk 'NR == 1 { print $1 }')
+    read -r user _ < <(who am i 2>/dev/null) || true
     [ -n "$user" ] || user=${USER:-$(id -un)}
     printf '%s' "$user"
 }
@@ -158,14 +160,17 @@ detect_login_user() {
 # [HANDLER] detect_login_client -> SSH 客户端 IP 或本地标记 local。
 # 用法：client=$(detect_login_client)
 detect_login_client() {
-    local client=''
+    local client='' line
     if [ -n "${SSH_CLIENT:-}" ]; then
         client=${SSH_CLIENT%% *}
     elif [ -n "${SSH_CONNECTION:-}" ]; then
         client=${SSH_CONNECTION%% *}
     else
-        client=$(who am i 2>/dev/null |
-            sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n 1)
+        line=$(who am i 2>/dev/null | sed -n '1p')
+        if [[ $line == *'('*')'* ]]; then
+            client=${line##*\(}
+            client=${client%%)*}
+        fi
     fi
     [ -n "$client" ] || client=local
     printf '%s' "$client"
@@ -177,23 +182,29 @@ detect_login_client() {
 # 过滤回环、容器和虚拟隧道接口。
 # 用法：while IFS=$'\t' read -r iface ip; do ...; done < <(collect_network_interfaces)
 collect_network_interfaces() {
-    local rows=''
+    local iface state address rest
     if command -v ip >/dev/null 2>&1; then
-        rows=$(LC_ALL=C ip -4 -br addr 2>/dev/null |
-            grep -vE '^(lo|docker|virbr|veth|br-|cni|flannel|cali|kube|tun|tap)' |
-            awk '{ print $1 "\t" $3 }' |
-            sed 's/\/.*//')
-    fi
-    if [ -n "$rows" ]; then
-        printf '%s\n' "$rows"
+        while read -r iface state address rest; do
+            [ -n "$iface" ] || continue
+            case $iface in
+                lo*|docker*|virbr*|veth*|br-*|cni*|flannel*|cali*|\
+                kube*|tun*|tap*) continue ;;
+            esac
+            [ -n "$address" ] || continue
+            printf '%s\t%s\n' "$iface" "${address%%/*}"
+        done < <(LC_ALL=C ip -4 -br addr 2>/dev/null)
     fi
 }
 
+_profile_begin 'platform'
 server_manufacturer=$(detect_manufacturer)
 server_product_name=$(detect_product_name)
 virt_type=$(detect_virtualization)
 system_uuid=$(detect_system_uuid)
+_profile_end
+_profile_begin 'session'
 locale_name=$(detect_locale)
 timezone_name=$(detect_timezone)
 login_user=$(detect_login_user)
 login_client=$(detect_login_client)
+_profile_end

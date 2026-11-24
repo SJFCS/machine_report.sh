@@ -62,12 +62,15 @@ MEM_WARN_PERCENT=10
 # 状态只依据 available 百分比，不依据 used。
 # 用法：status=$(memory_status_text 8.8 20 10)
 memory_status_text() {
-    local percent=$1 ok=$2 warn=$3 state
-    state=$(awk -v p="$percent" -v ok="$ok" -v warn="$warn" 'BEGIN {
-        if (p >= ok) print "ok"
-        else if (p >= warn) print "warn"
-        else print "crit"
-    }')
+    local percent=$1 ok=$2 warn=$3 state='crit'
+    local scaled_percent
+    if _number_to_scaled_into scaled_percent "$percent" 1; then
+        if (( scaled_percent >= ok * 10 )); then
+            state='ok'
+        elif (( scaled_percent >= warn * 10 )); then
+            state='warn'
+        fi
+    fi
     case "$state" in
         ok)   printf '%s●可用内存正常%s' "$C_OK" "$C_RESET" ;;
         warn) printf '%s●可用内存偏紧%s' "$C_WARN" "$C_RESET" ;;

@@ -2,3 +2,7 @@
 简化信息
          服务器运行报告                                  │
 │                         效能组·Devops Platform Service
+
+
+REPORT_PROFILE=1 
+# REPORT_GPU_ENABLED=0

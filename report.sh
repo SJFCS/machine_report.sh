@@ -4,18 +4,17 @@
 #
 # 终端“服务器报告”表格 + 条形图示例。
 # https://github.com/usgraphics/usgc-machine-report
-#
-# 默认只显示本机实际探测数据。设置 REPORT_MOCK_ENABLED=1（兼容
-# REPORT_MOCK=1）后才启用固定标量数据和 GPU/磁盘失败时的 demo 回退。
-#
-#
+REPORT_PROFILE=1 
+# REPORT_GPU_ENABLED=0
+
 # 本脚本的约定：
 #   1. 所有可能含中文、ANSI 或图标的宽度、补齐、居中、截断都经过
-#      display_width() / fit_display()；只有纯 ASCII 的数字后缀才直接用 ${#}。
+#      display_width() / fit_display()。单列文本走 Bash 快路径，复杂
+#      Unicode 文本走批量 Perl。
 #   2. Perl 自带 Unicode 属性匹配，用 East_Asian_Width 和
 #      General_Category 判断宽字符、组合符；无需安装 CPAN 包。
 #   3. ANSI CSI/OSC 序列占 0 列；私有区字符（Nerd Font）按 1 列处理。
-#   4. 单元格只支持单行。超宽内容显示为“…”并保留原始数据，不会撑破边框。
+#   4. 单元格只支持单行。超宽内容显示“…”并保留原始数据，不会撑破边框。
 #
 # ── 怎样增加字段 ────────────────────────────────────────────────────────
 # 按显示顺序调用 add_field 即可，三个底层数组会由函数自动同步：
@@ -31,8 +30,12 @@
 # 如果新增的字段名比现有列宽更长，可以调整 NAME_MIN / NAME_MAX；如果数据
 # 普遍更长，可以调整 DATA_MIN / DATA_MAX。无需修改任何画线函数。
 #
-# 依赖：Bash、Perl 5、awk。适用于 macOS/Linux。
+# 依赖：Bash、awk、Perl 5。适用于 macOS/Linux。
 # 颜色：终端里自动启用；设置 NO_COLOR=1 可关闭，FORCE_COLOR=1 可强制启用。
+# 性能：设置 REPORT_PROFILE=1 后，各采集与渲染阶段的耗时写入 stderr。
+# GPU：REPORT_GPU_ENABLED=0 跳过采集；REPORT_GPU_TIMEOUT 控制 nvidia-smi
+#      发出终止信号的秒数（默认 1，设为 0 表示不限制）。驱动处于不可中断
+#      等待时，信号也可能延迟生效；需要稳定速度时应直接跳过 GPU。
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
 #       REPORT_MOCK 作为兼容别名，外部传入 REPORT_MOCK_ENABLED 时优先。
 #
@@ -71,10 +74,10 @@
 #   max_display_width / max_tsv_column_width
 #   add_field / measure_fields / ensure_centered_width / ensure_data_width
 #   print_divider / print_dashed_divider / print_header
-#   print_merged_divider / print_centered / print_row
+#   print_merged_divider / _format_report_lines
 #   bar / percent_bar_display / disk_usage_display
 #   gpu_memory_display / gpu_util_display / load_display / stacked_bar
-#   用法：add_field 'LABEL' 'VALUE'；measure_fields；print_row LABEL VALUE。
+#   用法：add_field 'LABEL' 'VALUE'；measure_fields；render_report。
 #   TABLE 层只消费已完成的数据，不应调用 lsblk、nvidia-smi 或 dmidecode。
 #
 # [REPORT] 字段组装与输出
@@ -83,6 +86,7 @@
 
 set -u
 # REPORT_MOCK_ENABLED=1
+# REPORT_PROFILE=1
 # NO_COLOR=1
 
 # mock 默认关闭；兼容旧的 REPORT_MOCK 变量，并在入口处拒绝非法开关值。
@@ -96,6 +100,82 @@ case $report_mock_setting in
         exit 2
         ;;
 esac
+
+report_profile_setting=${REPORT_PROFILE:-0}
+case $report_profile_setting in
+    1|true|TRUE|yes|YES|on|ON) REPORT_PROFILE=1 ;;
+    0|false|FALSE|no|NO|off|OFF) REPORT_PROFILE=0 ;;
+    *)
+        printf '%s\n' \
+            "REPORT_PROFILE 只能是 0/1（也支持 true/false/on/off）：$report_profile_setting" >&2
+        exit 2
+        ;;
+esac
+
+report_gpu_setting=${REPORT_GPU_ENABLED:-1}
+case $report_gpu_setting in
+    1|true|TRUE|yes|YES|on|ON) REPORT_GPU_ENABLED=1 ;;
+    0|false|FALSE|no|NO|off|OFF) REPORT_GPU_ENABLED=0 ;;
+    *)
+        printf '%s\n' \
+            "REPORT_GPU_ENABLED 只能是 0/1（也支持 true/false/on/off）：$report_gpu_setting" >&2
+        exit 2
+        ;;
+esac
+
+report_gpu_timeout=${REPORT_GPU_TIMEOUT:-1}
+if ! [[ $report_gpu_timeout =~ ^[0-9]+$ ]]; then
+    printf '%s\n' \
+        "REPORT_GPU_TIMEOUT 必须是非负整数秒：$report_gpu_timeout" >&2
+    exit 2
+fi
+REPORT_GPU_TIMEOUT=$((10#$report_gpu_timeout))
+
+_profile_now_into() {
+    local __var=$1 now=${EPOCHREALTIME:-}
+    if [ -n "$now" ]; then
+        printf -v "$__var" '%s' "${now/./}"
+    else
+        printf -v "$__var" '%s' "$(
+            perl -MTime::HiRes=time -e 'printf "%.0f", time * 1_000_000'
+        )"
+    fi
+}
+
+if (( REPORT_PROFILE == 1 )); then
+    _profile_begin() {
+        REPORT_PROFILE_STAGE_LABEL=$1
+        _profile_now_into REPORT_PROFILE_STAGE_START_US
+    }
+
+    _profile_end() {
+        local now_us elapsed_us
+        _profile_now_into now_us
+        elapsed_us=$((now_us - REPORT_PROFILE_STAGE_START_US))
+        (( elapsed_us >= 0 )) || elapsed_us=0
+        printf 'REPORT_PROFILE %-20s %6d.%03d ms\n' \
+            "$REPORT_PROFILE_STAGE_LABEL" \
+            "$((elapsed_us / 1000))" \
+            "$((elapsed_us % 1000))" >&2
+    }
+
+    _profile_total() {
+        local now_us elapsed_us
+        _profile_now_into now_us
+        elapsed_us=$((now_us - REPORT_PROFILE_SCRIPT_START_US))
+        (( elapsed_us >= 0 )) || elapsed_us=0
+        printf 'REPORT_PROFILE %-20s %6d.%03d ms\n' \
+            'total' \
+            "$((elapsed_us / 1000))" \
+            "$((elapsed_us % 1000))" >&2
+    }
+
+    _profile_now_into REPORT_PROFILE_SCRIPT_START_US
+else
+    _profile_begin() { :; }
+    _profile_end() { :; }
+    _profile_total() { :; }
+fi
 
 # 左列和右列的最小/最大宽度，单位都是“terminal display columns”。
 # NAME_MAX 用来防止某个异常长的字段名把整张表撑得太宽；超长字段名会被截断。
@@ -161,9 +241,14 @@ fi
 # shellcheck shell=bash
 # ── 显示宽度引擎 ───────────────────────────────────────────────────────
 #
-# 这段 Perl 从标准输入读取一个 UTF-8 字符串，由 TABLE_MODE 决定行为：
-#   width：只输出该字符串的显示列数
-#   fit  ：在 TABLE_LIMIT 列以内截断，并输出可以安全打印的字符串
+# 这段 Perl 从标准输入读取 UTF-8 字符串，由 TABLE_MODE 决定行为：
+#   width       ：只输出该字符串的显示列数
+#   fit         ：在 TABLE_LIMIT 列以内截断，并输出可以安全打印的字符串
+#   batch-width ：读取 NUL 分隔的多个字符串，逐项输出 NUL 分隔的宽度
+#   render-report：一次输出居中行和字段行，减少一次 Perl 启动
+#
+# 渲染路径把整张表交给一个 Perl 进程处理，避免每个单元格启动一次解释器。
+# 纯 ASCII 和已知单列字符使用下面基于 ${#} 的 Bash 快路径。
 #
 # 采用 Perl 的 Unicode 属性而不是手写简体中文区间，原因有三点：
 #   * 能覆盖中文、日文、韩文、全角符号以及以后新增的宽字符；
@@ -307,25 +392,26 @@ sub tokenize {
     return @tokens;
 }
 
-my @tokens = tokenize($text);
+sub text_width {
+    my ($value) = @_;
+    my $width = 0;
+    $width += $_->[1] for tokenize($value);
+    return $width;
+}
 
-if ($mode eq 'fit') {
-    $limit = int($limit);
-    if ($limit <= 0) {
-        print '';
-        exit;
-    }
+sub fit_text {
+    my ($value, $max) = @_;
+    $max = int($max);
+    return '' if $max <= 0;
 
+    my @tokens = tokenize($value);
     my $total = 0;
     $total += $_->[1] for @tokens;
-    if ($total <= $limit) {
-        print $text;
-        exit;
-    }
+    return $value if $total <= $max;
 
     # 预留一列给省略号。最后一个完整字形簇之后可能还有颜色码，
     # 所以只在确实遇到过 ANSI 时补一个 reset，避免颜色泄漏到后续边框。
-    my $budget = $limit - 1;
+    my $budget = $max - 1;
     my $width = 0;
     my $out = '';
     my $used_ansi = 0;
@@ -342,31 +428,204 @@ if ($mode eq 'fit') {
     }
     $out .= '…';
     $out .= "\e[0m" if $used_ansi;
-    print $out;
+    return $out;
+}
+
+# 表格行需要“截断 + 补空格”。把两步合成一次 token 化，避免每个单元格
+# 在同一个 Perl 进程里还要重复扫描字符串。
+sub fit_and_pad {
+    my ($value, $max) = @_;
+    $max = int($max);
+    return '' if $max <= 0;
+
+    my @tokens = tokenize($value);
+    my $total = 0;
+    $total += $_->[1] for @tokens;
+    return $value . (' ' x ($max - $total)) if $total <= $max;
+
+    my $budget = $max - 1;
+    my $width = 0;
+    my $out = '';
+    my $used_ansi = 0;
+    for my $token (@tokens) {
+        my ($chunk, $chunk_width) = @$token;
+        if ($chunk_width == 0) {
+            $out .= $chunk;
+            $used_ansi = 1 if $chunk =~ /\e/;
+            next;
+        }
+        last if $width + $chunk_width > $budget;
+        $out .= $chunk;
+        $width += $chunk_width;
+    }
+    $out .= '…';
+    $out .= "\e[0m" if $used_ansi;
+    $out .= ' ' x ($max - $width - 1) if $max > $width + 1;
+    return $out;
+}
+
+sub centered_line {
+    my ($value, $inner) = @_;
+    $inner = int($inner);
+    return '' if $inner <= 0;
+
+    my $fitted = fit_text($value, $inner);
+    my $width = text_width($fitted);
+    my $left = int(($inner - $width) / 2);
+    my $right = $inner - $width - $left;
+    return '│' . (' ' x $left) . $fitted . (' ' x $right) . '│';
+}
+
+sub input_records {
+    my @records = split(/\0/, $text, -1);
+    pop @records if @records && $records[-1] eq '';
+    return @records;
+}
+
+if ($mode eq 'batch-width') {
+    print text_width($_), "\0" for input_records();
     exit;
 }
 
-my $width = 0;
-$width += $_->[1] for @tokens;
-print $width;
+if ($mode eq 'render-report') {
+    my $inner = int($ENV{TABLE_INNER} || 0);
+    my $center_count = int($ENV{TABLE_CENTER_COUNT} || 0);
+    my $row_count = int($ENV{TABLE_ROWS} || 0);
+    my $name_width = int($ENV{TABLE_NAME_W} || 0);
+    my $data_width = int($ENV{TABLE_DATA_W} || 0);
+    my @records = input_records();
+    my @centered = splice(@records, 0, $center_count);
+    my @labels = splice(@records, 0, $row_count);
+
+    print 'C', centered_line($_, $inner), "\0" for @centered;
+    for my $i (0 .. $row_count - 1) {
+        my $label = defined $labels[$i] ? $labels[$i] : '';
+        my $value = defined $records[$i] ? $records[$i] : '';
+        print 'R',
+            '│ ',
+            fit_and_pad($label, $name_width),
+            ' │ ',
+            fit_and_pad($value, $data_width),
+            ' │', "\0";
+    }
+    exit;
+}
+
+if ($mode eq 'fit') {
+    print fit_text($text, $limit);
+    exit;
+}
+
+print text_width($text);
 PERL
 
+# Bash 正则先存入变量：直接把带空格的字符区间写在 [[ =~ ]] 里会被
+# Bash 当成语法分隔符。ANSI 清理和单列宽度判断复用这两个表达式。
+TABLE_ASCII_RE='^[ -~]*$'
+TABLE_CSI_RE=$'\e\\[[0-?]*[ -/]*[@-~]'
+TABLE_OSC_RE=$'\e\\][^\a]*(\a|\e\\\\)'
+
+# [TABLE] _strip_ansi_into VAR TEXT -> 去掉 CSI/OSC 控制序列。
+_strip_ansi_into() {
+    local __var=$1 __strip_text=${2-}
+    if [[ $__strip_text == *$'\e'* ]]; then
+        while [[ $__strip_text =~ $TABLE_CSI_RE ]]; do
+            __strip_text=${__strip_text/"${BASH_REMATCH[0]}"/}
+        done
+        while [[ $__strip_text =~ $TABLE_OSC_RE ]]; do
+            __strip_text=${__strip_text/"${BASH_REMATCH[0]}"/}
+        done
+    fi
+    printf -v "$__var" '%s' "$__strip_text"
+}
+
+# [TABLE] _single_width_filter_into VAR TEXT -> 保留已知单列字符。
+# 用于快速判断一段文本是否只由 ASCII、边框和进度符号组成；其他宽字符、
+# 组合符或控制字符会变成“?”，以便调用方通过比较识别是否走了快路径。
+_single_width_filter_into() {
+    local __var=$1 __single_text __single_char __single_out=''
+    _strip_ansi_into __single_text "${2-}"
+
+    while [[ -n $__single_text ]]; do
+        __single_char=${__single_text:0:1}
+        __single_text=${__single_text:1}
+        case $__single_char in
+            [\ -~]) __single_out+=$__single_char ;;
+            '─'|'│'|'┌'|'┐'|'└'|'┘'|'├'|'┤'|'┬'|'┴'|'┼'|'┄')
+                __single_out+=$__single_char
+                ;;
+            '█'|'▓'|'░'|'·'|'…'|'●'|'–')
+                __single_out+=$__single_char
+                ;;
+            *) __single_out+='?' ;;
+        esac
+    done
+    printf -v "$__var" '%s' "$__single_out"
+}
+
+# [TABLE] _simple_display_width_into VAR TEXT -> 单列字符的 Bash 快路径。
+# 去掉 ANSI 后，如果剩余字符全部在单列白名单中，此时 ${#text} 就是显示
+# 宽度；发现宽字符或组合符时返回 1，交给 Perl 精确计算。
+_simple_display_width_into() {
+    local __var=$1 plain allowed
+    _strip_ansi_into plain "${2-}"
+    _single_width_filter_into allowed "$plain"
+    [[ $allowed == "$plain" ]] || return 1
+    printf -v "$__var" '%s' "${#plain}"
+}
+
+# [TABLE] _truncate_bash_into VAR TEXT MAX MARK -> ASCII 快路径截断。
+_truncate_bash_into() {
+    local __var=$1 __trunc_text=$2 max=$3 mark=$4 __trunc_value
+    if (( max <= 0 )); then
+        __trunc_value=''
+    elif (( ${#__trunc_text} > max )); then
+        __trunc_value="${__trunc_text:0:max-1}${mark}"
+    else
+        __trunc_value=$__trunc_text
+    fi
+    printf -v "$__var" '%s' "$__trunc_value"
+}
+
 # [TABLE] display_width TEXT -> 输出终端显示列数。
-# 使用管道而不是命令行参数，避免空格、引号、反斜杠或 ANSI 被二次解释。
+# 纯 ASCII 和已确认的单列 Unicode 不启动进程；复杂文本交给 Perl。
 # 用法：columns=$(display_width "$cell")
 display_width() {
-    local text=$1
+    local text=${1-} simple_width
+    if [[ $text =~ $TABLE_ASCII_RE ]]; then
+        printf '%s' "${#text}"
+        return
+    fi
+    if _simple_display_width_into simple_width "$text"; then
+        printf '%s' "$simple_width"
+        return
+    fi
     printf '%s' "$text" |
         TABLE_MODE=width perl -CS -e "$DISPLAY_WIDTH_PERL"
+}
+
+# [TABLE] _fit_display_into VAR TEXT MAX -> 截断后写入指定变量。
+_fit_display_into() {
+    local __var=$1 __fit_text=$2 max=${3:-0}
+    local __fit_result
+    [[ $max =~ ^[0-9]+$ ]] || max=0
+
+    if [[ $__fit_text =~ $TABLE_ASCII_RE ]]; then
+        _truncate_bash_into "$__var" "$__fit_text" "$max" '…'
+        return
+    fi
+    __fit_result=$(printf '%s' "$__fit_text" |
+        TABLE_MODE=fit TABLE_LIMIT="$max" \
+            perl -CS -e "$DISPLAY_WIDTH_PERL")
+    printf -v "$__var" '%s' "$__fit_result"
 }
 
 # [TABLE] fit_display TEXT MAX -> 按显示列数截断，超宽时以“…”结尾。
 # 用法：fitted=$(fit_display "$long_text" 40)
 fit_display() {
-    local text=$1 max=$2
-    printf '%s' "$text" |
-        TABLE_MODE=fit TABLE_LIMIT="$max" \
-            perl -CS -e "$DISPLAY_WIDTH_PERL"
+    local text=${1-} max=${2:-0} fitted
+    _fit_display_into fitted "$text" "$max"
+    printf '%s' "$fitted"
 }
 
 # [TABLE] repeat_char CHAR COUNT -> 重复单列字符，用于边框和条形图。
@@ -379,26 +638,69 @@ repeat_char() {
     printf '%s' "${out// /$char}"
 }
 
+# [TABLE] _pad_display_into VAR TEXT WIDTH [CURRENT_WIDTH]
+# 左对齐并用 ASCII 空格补齐；CURRENT_WIDTH 可跳过再次测量。
+_pad_display_into() {
+    local __var=$1 __pad_text=$2 width=${3:-0} current=${4-}
+    [[ $width =~ ^[0-9]+$ ]] || width=0
+
+    if [[ $__pad_text =~ $TABLE_ASCII_RE ]]; then
+        current=${#__pad_text}
+    elif [[ -z $current ]]; then
+        current=$(display_width "$__pad_text")
+    fi
+
+    if (( current < width )); then
+        printf -v "$__var" '%s%*s' "$__pad_text" "$((width - current))" ''
+    else
+        printf -v "$__var" '%s' "$__pad_text"
+    fi
+}
+
 # [TABLE] pad_display TEXT WIDTH -> 左对齐并用 ASCII 空格补齐。
 # 用法：padded=$(pad_display "$text" 20)
 pad_display() {
-    local text=$1 width=$2 current
-    current=$(display_width "$text")
-    printf '%s' "$text"
-    if (( current < width )); then
-        printf '%*s' "$((width - current))" ''
+    local text=${1-} width=${2:-0} padded
+    _pad_display_into padded "$text" "$width"
+    printf '%s' "$padded"
+}
+
+# [TABLE] _display_widths_batch VALUE... -> 输出 NUL 分隔的宽度。
+# 纯 ASCII/单列文本批次不启动进程；复杂 Unicode/ANSI 只启动一个 Perl。
+_display_widths_batch() {
+    local text simple_width context_width needs_perl=0
+    local -a computed=()
+
+    for text in "$@"; do
+        if [[ $text =~ $TABLE_ASCII_RE ]]; then
+            computed+=("${#text}")
+        elif _simple_display_width_into simple_width "$text"; then
+            computed+=("$simple_width")
+        else
+            needs_perl=1
+            break
+        fi
+    done
+    if (( needs_perl == 0 )); then
+        for context_width in "${computed[@]}"; do
+            printf '%s\0' "$context_width"
+        done
+        return
     fi
+
+    printf '%s\0' "$@" |
+        TABLE_MODE=batch-width perl -CS -e "$DISPLAY_WIDTH_PERL"
 }
 
 # [TABLE] max_display_width VALUE... -> 返回最大显示列数。
 # 传入数组时必须写成 "${array[@]}"，避免元素内空格被拆成新参数。
 # 用法：width=$(max_display_width "${FIELD_LABELS[@]}")
 max_display_width() {
-    local value width max=0
-    for value in "$@"; do
-        width=$(display_width "$value")
+    local width max=0
+    while IFS= read -r -d '' width; do
+        [[ $width =~ ^[0-9]+$ ]] || width=0
         (( width > max )) && max=$width
-    done
+    done < <(_display_widths_batch "$@")
     printf '%s' "$max"
 }
 
@@ -410,14 +712,133 @@ max_tsv_column_width() {
     shift
     local row width max=0
     local -a cells=()
+    local -a column_values=()
     for row in "$@"; do
         IFS=$'\t' read -r -a cells <<<"$row"
-        width=$(display_width "${cells[column]:-}")
-        (( width > max )) && max=$width
+        column_values+=("${cells[column]:-}")
     done
+    if (( ${#column_values[@]} == 0 )); then
+        printf '0'
+        return
+    fi
+    while IFS= read -r -d '' width; do
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        (( width > max )) && max=$width
+    done < <(_display_widths_batch "${column_values[@]}")
     printf '%s' "$max"
 }
 
+# shellcheck shell=bash
+# ── [FORMAT] 无外部进程的数值基础函数 ─────────────────────────────────
+#
+# 采集阶段早于 40-format.sh 执行，因此这些最底层的定点换算单独放在这里。
+# 它们只使用 Bash 内建算术，避免每个 CPU/内存/容量数值都启动一次 awk。
+# 输入范围受 64 位整数限制；需要更高精度或科学计数法时由上层回退到 awk。
+
+# [FORMAT] _number_to_scaled_into VAR VALUE DECIMALS -> 定点整数。
+# 例如 _number_to_scaled_into x 12.34 2 得到 1234。
+# 只接受普通十进制（可带符号、小数），指数形式返回 1。
+_number_to_scaled_into() {
+    local __var=$1 value=${2-} decimals=${3:-0}
+    local sign int_part frac digits scaled
+
+    [[ $decimals =~ ^[0-9]+$ ]] || return 1
+    (( decimals <= 6 )) || return 1
+    case $value in
+        .*) value="0$value" ;;
+        -.*) value="-0${value#-}" ;;
+        +.*) value="+0${value#+}" ;;
+    esac
+    [[ $value =~ ^([+-]?)([0-9]+)([.]([0-9]*))?$ ]] || return 1
+
+    sign=${BASH_REMATCH[1]}
+    int_part=${BASH_REMATCH[2]}
+    frac=${BASH_REMATCH[4]:-}
+    while [[ $int_part == 0* && ${#int_part} -gt 1 ]]; do
+        int_part=${int_part#0}
+    done
+    while (( ${#frac} < decimals )); do
+        frac+='0'
+    done
+    if (( decimals == 0 )); then
+        frac=''
+    else
+        frac=${frac:0:decimals}
+    fi
+
+    digits="${int_part}${frac}"
+    scaled=$((10#$digits))
+    [[ $sign == - ]] && scaled=$((-scaled))
+    printf -v "$__var" '%s' "$scaled"
+}
+
+# [FORMAT] _number_integer_into VAR VALUE -> 截断为整数。
+_number_integer_into() {
+    _number_to_scaled_into "${1-}" "${2-}" 0
+}
+
+# [FORMAT] _scaled_to_fixed_into VAR VALUE DECIMALS -> 定点整数转小数文本。
+_scaled_to_fixed_into() {
+    local __var=$1 value=${2-0} decimals=${3:-0}
+    local sign='' factor=1 whole frac i
+
+    [[ $value =~ ^[+-]?[0-9]+$ && $decimals =~ ^[0-9]+$ ]] || return 1
+    if (( value < 0 )); then
+        sign='-'
+        value=$((-value))
+    fi
+    for ((i = 0; i < decimals; i++)); do
+        factor=$((factor * 10))
+    done
+    whole=$((value / factor))
+    frac=$((value % factor))
+    if (( decimals == 0 )); then
+        printf -v "$__var" '%s%d' "$sign" "$whole"
+    else
+        printf -v "$__var" '%s%d.%0*d' "$sign" "$whole" "$decimals" "$frac"
+    fi
+}
+
+# [FORMAT] _ratio_to_fixed_into VAR NUMERATOR DENOMINATOR DECIMALS
+# 整数比值四舍五入成固定小数位；DENOMINATOR 必须大于 0。
+_ratio_to_fixed_into() {
+    local __var=$1 numerator=${2-0} denominator=${3-1} decimals=${4:-0}
+    local sign='' factor=1 scaled whole frac i
+
+    [[ $numerator =~ ^[+-]?[0-9]+$ ]] || return 1
+    [[ $denominator =~ ^[0-9]+$ ]] || return 1
+    [[ $decimals =~ ^[0-9]+$ ]] || return 1
+    (( denominator > 0 && decimals <= 6 )) || return 1
+
+    for ((i = 0; i < decimals; i++)); do
+        factor=$((factor * 10))
+    done
+    if (( numerator < 0 )); then
+        sign='-'
+        numerator=$((-numerator))
+    fi
+    scaled=$(((numerator * factor + denominator / 2) / denominator))
+    (( scaled == 0 )) && sign=''
+    whole=$((scaled / factor))
+    frac=$((scaled % factor))
+    if (( decimals == 0 )); then
+        printf -v "$__var" '%s%d' "$sign" "$whole"
+    else
+        printf -v "$__var" '%s%d.%0*d' "$sign" "$whole" "$decimals" "$frac"
+    fi
+}
+
+# [FORMAT] _mhz_to_ghz_into VAR MHZ -> GHz 文本，保留两位小数。
+# 构造可被 Bash printf 解析的十进制文本，既不需要 awk，也与 printf "%.2f"
+# 的舍入行为保持一致。
+_mhz_to_ghz_into() {
+    local __var=$1 mhz=${2-0} whole remainder decimal
+    [[ $mhz =~ ^[0-9]+$ ]] || return 1
+    whole=$((mhz / 1000))
+    remainder=$((mhz % 1000))
+    printf -v decimal '%d.%03d' "$whole" "$remainder"
+    printf -v "$__var" '%.2f' "$decimal"
+}
 # shellcheck shell=bash
 #
 # ── 数据源开关与宿主机基础信息 ────────────────────────────────────────
@@ -489,11 +910,11 @@ detect_os_name() {
 cpu_frequency_text() {
     local min_mhz=${1:-0} max_mhz=${2:-0} min_ghz max_ghz
     if (( min_mhz > 0 && max_mhz > 0 )); then
-        min_ghz=$(awk -v m="$min_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
-        max_ghz=$(awk -v m="$max_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
+        _mhz_to_ghz_into min_ghz "$min_mhz"
+        _mhz_to_ghz_into max_ghz "$max_mhz"
         printf '%s–%s GHz' "$min_ghz" "$max_ghz"
     elif (( max_mhz > 0 )); then
-        max_ghz=$(awk -v m="$max_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
+        _mhz_to_ghz_into max_ghz "$max_mhz"
         printf 'MAX %s GHz' "$max_ghz"
     else
         printf '%s' '-'
@@ -504,6 +925,7 @@ cpu_frequency_text() {
 collect_cpu_scalars() {
     local model='' sockets_text='' cores_text='' min_text='' max_text=''
     local sockets=1 total_cores=1 min_mhz=0 max_mhz=0 frequency='-' i
+    local key value cores_per_socket=0
 
     if [ "$platform_name" = Darwin ]; then
         model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
@@ -511,46 +933,28 @@ collect_cpu_scalars() {
         total_cores=$(sysctl -n hw.ncpu 2>/dev/null)
     else
         if command -v lscpu >/dev/null 2>&1; then
-            IFS=$'\t' read -r model sockets_text cores_text min_text max_text < <(
-                LC_ALL=C lscpu 2>/dev/null | awk -F: '
-                    /^[[:space:]]*Model name/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        model = v
-                    }
-                    /^[[:space:]]*Socket\(s\)/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        sockets = v
-                    }
-                    /^[[:space:]]*Core\(s\) per socket/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        cores = v
-                    }
-                    /^[[:space:]]*CPU min MHz/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        min_mhz = v
-                    }
-                    /^[[:space:]]*CPU max MHz/ {
-                        v = $2
-                        gsub(/^[ \t]+|[ \t]+$/, "", v)
-                        max_mhz = v
-                    }
-                    END {
-                        printf "%s\t%s\t%s\t%s\t%s\n",
-                            model, sockets, cores, min_mhz, max_mhz
-                    }
-                '
-            )
+            lscpu_output=$(LC_ALL=C lscpu 2>/dev/null)
+            while IFS=: read -r key value; do
+                key=${key//[[:space:]]/}
+                value=${value#"${value%%[![:space:]]*}"}
+                value=${value%"${value##*[![:space:]]}"}
+                case $key in
+                    Modelname) model=$value ;;
+                    'Socket(s)') sockets_text=$value ;;
+                    'Core(s)persocket') cores_text=$value ;;
+                    CPUminMHz) min_text=$value ;;
+                    CPUmaxMHz) max_text=$value ;;
+                esac
+            done <<<"$lscpu_output"
         fi
         if [ -z "$model" ] && [ -r /proc/cpuinfo ]; then
-            model=$(awk -F: '/^[[:space:]]*model name/ {
-                sub(/^[ \t]+/, "", $2)
-                print $2
-                exit
-            }' /proc/cpuinfo 2>/dev/null)
+            while IFS=: read -r key value; do
+                key=${key//[[:space:]]/}
+                if [[ $key == modelname ]]; then
+                    model=${value#"${value%%[![:space:]]*}"}
+                    break
+                fi
+            done < /proc/cpuinfo
         fi
         total_cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null)
         [ -n "$total_cores" ] || total_cores=$(nproc 2>/dev/null)
@@ -558,18 +962,17 @@ collect_cpu_scalars() {
 
     [ -n "$model" ] || model='UNKNOWN'
     model=${model//$'\t'/ }
-    sockets=$(awk -v v="$sockets_text" 'BEGIN { printf "%d", v + 0 }')
+    sockets=0
+    _number_integer_into sockets "$sockets_text"
     (( sockets > 0 )) || sockets=1
-    total_cores=$(awk -v v="$total_cores" 'BEGIN { printf "%d", v + 0 }')
+    _number_integer_into total_cores "$total_cores"
     if (( total_cores <= 0 )); then
-        local cores_per_socket
-        cores_per_socket=$(awk -v v="$cores_text" \
-            'BEGIN { printf "%d", v + 0 }')
+        _number_integer_into cores_per_socket "$cores_text"
         (( cores_per_socket > 0 )) || cores_per_socket=1
         total_cores=$((sockets * cores_per_socket))
     fi
-    min_mhz=$(awk -v v="$min_text" 'BEGIN { printf "%d", v + 0 }')
-    max_mhz=$(awk -v v="$max_text" 'BEGIN { printf "%d", v + 0 }')
+    _number_integer_into min_mhz "$min_text"
+    _number_integer_into max_mhz "$max_text"
     frequency=$(cpu_frequency_text "$min_mhz" "$max_mhz")
 
     cpu_models=()
@@ -589,7 +992,9 @@ collect_load_averages() {
     if [ "$platform_name" = Darwin ]; then
         values=$(sysctl -n vm.loadavg 2>/dev/null)
     elif [ -r /proc/loadavg ]; then
-        values=$(awk '{ print $1, $2, $3 }' /proc/loadavg 2>/dev/null)
+        read -r load1 load5 load15 values < /proc/loadavg || true
+        [ -n "${load1:-}" ] && [ -n "${load5:-}" ] && [ -n "${load15:-}" ] &&
+            return
     fi
     if [ -z "$values" ]; then
         values=$(uptime 2>/dev/null |
@@ -607,8 +1012,10 @@ collect_load_averages() {
 # [HANDLER] collect_uptime -> 人类可读的系统运行时间。
 collect_uptime() {
     local seconds=0 boot=''
+    local days hours minutes
     if [ -r /proc/uptime ]; then
-        seconds=$(awk '{ printf "%d", $1 }' /proc/uptime 2>/dev/null)
+        read -r seconds boot < /proc/uptime || true
+        seconds=${seconds%%.*}
     elif [ "$platform_name" = Darwin ]; then
         boot=$(sysctl -n kern.boottime 2>/dev/null |
             sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
@@ -617,14 +1024,16 @@ collect_uptime() {
         fi
     fi
     if (( seconds > 0 )); then
-        uptime=$(awk -v s="$seconds" 'BEGIN {
-            d = int(s / 86400)
-            h = int((s % 86400) / 3600)
-            m = int((s % 3600) / 60)
-            if (d > 0) printf "%dd %dh %dm", d, h, m
-            else if (h > 0) printf "%dh %dm", h, m
-            else printf "%dm", m
-        }')
+        days=$((seconds / 86400))
+        hours=$(((seconds % 86400) / 3600))
+        minutes=$(((seconds % 3600) / 60))
+        if (( days > 0 )); then
+            printf -v uptime '%dd %dh %dm' "$days" "$hours" "$minutes"
+        elif (( hours > 0 )); then
+            printf -v uptime '%dh %dm' "$hours" "$minutes"
+        else
+            printf -v uptime '%dm' "$minutes"
+        fi
     else
         uptime='UNKNOWN'
     fi
@@ -634,27 +1043,26 @@ collect_uptime() {
 collect_memory_scalars() {
     local total_kb=0 used_kb=0 cache_kb=0 free_kb=0 shared_kb=0 avail_kb=0
     local total_bytes=0
+    local buffers_kb=0 cached_kb=0 key value
 
     if [ -r /proc/meminfo ]; then
-        read -r total_kb used_kb cache_kb free_kb shared_kb avail_kb < <(
-            awk '
-                /^MemTotal:/ { total = $2 }
-                /^MemFree:/ { free = $2 }
-                /^MemAvailable:/ { avail = $2 }
-                /^Buffers:/ { buffers = $2 }
-                /^Cached:/ { cached = $2 }
-                /^Shmem:/ { shared = $2 }
-                END {
-                    cache = buffers + cached
-                    if (avail == "") avail = free + cache
-                    used = total - free - cache
-                    if (used < 0) used = 0
-                    if (used > total) used = total
-                    printf "%.0f %.0f %.0f %.0f %.0f %.0f\n",
-                        total, used, cache, free, shared, avail
-                }
-            ' /proc/meminfo 2>/dev/null
-        )
+        while IFS=: read -r key value; do
+            value=${value//[[:space:]]/}
+            value=${value%kB}
+            case $key in
+                MemTotal) total_kb=$value ;;
+                MemFree) free_kb=$value ;;
+                MemAvailable) avail_kb=$value ;;
+                Buffers) buffers_kb=$value ;;
+                Cached) cached_kb=$value ;;
+                Shmem) shared_kb=$value ;;
+            esac
+        done < /proc/meminfo
+        cache_kb=$((buffers_kb + cached_kb))
+        (( avail_kb > 0 )) || avail_kb=$((free_kb + cache_kb))
+        used_kb=$((total_kb - free_kb - cache_kb))
+        (( used_kb < 0 )) && used_kb=0
+        (( used_kb > total_kb )) && used_kb=$total_kb
     elif [ "$platform_name" = Darwin ] &&
         command -v vm_stat >/dev/null 2>&1; then
         total_bytes=$(sysctl -n hw.memsize 2>/dev/null)
@@ -682,31 +1090,43 @@ collect_memory_scalars() {
         )
     fi
 
-    mem_total=$(awk -v kb="$total_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_used=$(awk -v kb="$used_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_cache=$(awk -v kb="$cache_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_free=$(awk -v kb="$free_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_shared=$(awk -v kb="$shared_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')
-    mem_available=$(awk -v kb="$avail_kb" \
-        'BEGIN { printf "%.1f", kb / 1048576 }')
+    _ratio_to_fixed_into mem_total "$total_kb" 1048576 1
+    _ratio_to_fixed_into mem_used "$used_kb" 1048576 1
+    _ratio_to_fixed_into mem_cache "$cache_kb" 1048576 1
+    _ratio_to_fixed_into mem_free "$free_kb" 1048576 1
+    _ratio_to_fixed_into mem_shared "$shared_kb" 1048576 1
+    _ratio_to_fixed_into mem_available "$avail_kb" 1048576 1
 }
 
 # [HANDLER] collect_real_scalars -> 关闭 mock 时的完整真实标量数据。
 collect_real_scalars() {
+    _profile_begin 'os'
     os_name=$(detect_os_name)
+    _profile_end
+    _profile_begin 'cpu'
     collect_cpu_scalars
+    _profile_end
+    _profile_begin 'load'
     collect_load_averages
+    _profile_end
+    _profile_begin 'uptime'
     collect_uptime
+    _profile_end
+    _profile_begin 'memory'
     collect_memory_scalars
+    _profile_end
 }
 
 if (( REPORT_MOCK_ENABLED == 1 )); then
+    _profile_begin 'mock scalars'
     load_mock_scalars
+    _profile_end
 else
     collect_real_scalars
 fi
 
 # 内核版本始终使用真实值；mock 只影响上方演示指标。
+_profile_begin 'metadata'
 kernel_version=$(uname -r 2>/dev/null)
 [ -n "$kernel_version" ] || kernel_version=unknown
 kernel_summary="${platform_name} ${kernel_version} · ${server_arch}"
@@ -719,6 +1139,7 @@ full_hostname=$(hostname -f 2>/dev/null)
 
 cpu_model_width=$(max_display_width "${cpu_models[@]}")
 cores="${cpu_cores} vCPU(s) / ${cpu_sockets} Socket(s)"
+_profile_end
 
 # shellcheck shell=bash
 #
@@ -773,7 +1194,7 @@ detect_product_name() {
 # 无法识别时沿用 BARE METAL 回退值，不等同于已确认是裸机。
 # 用法：virt=$(detect_virtualization)
 detect_virtualization() {
-    local virt vendor manufacturer product
+    local virt='' vendor='' manufacturer='' product=''
 
     if command -v systemd-detect-virt >/dev/null 2>&1; then
         virt=$(systemd-detect-virt 2>/dev/null)
@@ -783,14 +1204,16 @@ detect_virtualization() {
         esac
     fi
 
-    if command -v lscpu >/dev/null 2>&1; then
-        vendor=$(lscpu 2>/dev/null | awk -F: '
-            /Hypervisor vendor/ {
-                gsub(/^[ \t]+/, "", $2)
-                print $2
-                exit
-            }
-        ')
+    if [ -n "${lscpu_output:-}" ]; then
+        local key value
+        while IFS=: read -r key value; do
+            key=${key//[[:space:]]/}
+            if [[ $key == Hypervisorvendor ]]; then
+                vendor=${value#"${value%%[![:space:]]*}"}
+                vendor=${vendor%"${vendor##*[![:space:]]}"}
+                break
+            fi
+        done <<<"$lscpu_output"
         if [ -n "$vendor" ]; then
             printf '%s' "$vendor" | tr '[:lower:]' '[:upper:]'
             return
@@ -871,7 +1294,7 @@ detect_timezone() {
 # 用法：user=$(detect_login_user)
 detect_login_user() {
     local user
-    user=$(who am i 2>/dev/null | awk 'NR == 1 { print $1 }')
+    read -r user _ < <(who am i 2>/dev/null) || true
     [ -n "$user" ] || user=${USER:-$(id -un)}
     printf '%s' "$user"
 }
@@ -879,14 +1302,17 @@ detect_login_user() {
 # [HANDLER] detect_login_client -> SSH 客户端 IP 或本地标记 local。
 # 用法：client=$(detect_login_client)
 detect_login_client() {
-    local client=''
+    local client='' line
     if [ -n "${SSH_CLIENT:-}" ]; then
         client=${SSH_CLIENT%% *}
     elif [ -n "${SSH_CONNECTION:-}" ]; then
         client=${SSH_CONNECTION%% *}
     else
-        client=$(who am i 2>/dev/null |
-            sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n 1)
+        line=$(who am i 2>/dev/null | sed -n '1p')
+        if [[ $line == *'('*')'* ]]; then
+            client=${line##*\(}
+            client=${client%%)*}
+        fi
     fi
     [ -n "$client" ] || client=local
     printf '%s' "$client"
@@ -898,26 +1324,32 @@ detect_login_client() {
 # 过滤回环、容器和虚拟隧道接口。
 # 用法：while IFS=$'\t' read -r iface ip; do ...; done < <(collect_network_interfaces)
 collect_network_interfaces() {
-    local rows=''
+    local iface state address rest
     if command -v ip >/dev/null 2>&1; then
-        rows=$(LC_ALL=C ip -4 -br addr 2>/dev/null |
-            grep -vE '^(lo|docker|virbr|veth|br-|cni|flannel|cali|kube|tun|tap)' |
-            awk '{ print $1 "\t" $3 }' |
-            sed 's/\/.*//')
-    fi
-    if [ -n "$rows" ]; then
-        printf '%s\n' "$rows"
+        while read -r iface state address rest; do
+            [ -n "$iface" ] || continue
+            case $iface in
+                lo*|docker*|virbr*|veth*|br-*|cni*|flannel*|cali*|\
+                kube*|tun*|tap*) continue ;;
+            esac
+            [ -n "$address" ] || continue
+            printf '%s\t%s\n' "$iface" "${address%%/*}"
+        done < <(LC_ALL=C ip -4 -br addr 2>/dev/null)
     fi
 }
 
+_profile_begin 'platform'
 server_manufacturer=$(detect_manufacturer)
 server_product_name=$(detect_product_name)
 virt_type=$(detect_virtualization)
 system_uuid=$(detect_system_uuid)
+_profile_end
+_profile_begin 'session'
 locale_name=$(detect_locale)
 timezone_name=$(detect_timezone)
 login_user=$(detect_login_user)
 login_client=$(detect_login_client)
+_profile_end
 # shellcheck shell=bash
 # ── [FORMAT] 通用数值与百分比 ──────────────────────────────────────────
 
@@ -951,10 +1383,28 @@ nonfinite_as_dash() {
 #   available 与 free/buff-cache 有重叠
 # 因此后面几项的百分比不会全部相加为 100%，这是指标定义不同，不是算错。
 percent_of() {
-    local value=${1-} total=${2-} result
+    local value=${1-} total=${2-} result sign=''
+    local scaled_value scaled_total tenths
     if ! is_number "$value" || ! is_number "$total"; then
         printf '%s' '-'
         return 0
+    fi
+    if _number_to_scaled_into scaled_value "$value" 6 &&
+        _number_to_scaled_into scaled_total "$total" 6; then
+        if (( scaled_total <= 0 )); then
+            printf '%s' '-'
+            return 0
+        fi
+        if (( scaled_value < 0 )); then
+            sign='-'
+            scaled_value=$((-scaled_value))
+        fi
+        if (( scaled_value <= 8000000000000000 )); then
+            tenths=$(((scaled_value * 1000 + scaled_total / 2) / scaled_total))
+            _scaled_to_fixed_into result "$tenths" 1
+            printf '%s%s' "$sign" "$result"
+            return 0
+        fi
     fi
     result=$(awk -v v="$value" -v t="$total" 'BEGIN {
         if (t <= 0) { print "-"; exit }
@@ -967,9 +1417,26 @@ percent_of() {
 # BYTES 必须是有限的非负数，否则返回 "-"。
 # 用法：size=$(human_bytes 1992294400)
 human_bytes() {
-    local bytes=${1-} result
+    local bytes=${1-} result unit=0 divisor=1
+    local -a units=('B' 'K' 'M' 'G' 'T' 'P')
     if ! is_number "$bytes" || [[ $bytes == -* ]]; then
         printf '%s' '-'
+        return 0
+    fi
+    if [[ $bytes =~ ^[0-9]+$ ]]; then
+        while (( unit < 5 && bytes >= divisor * 1024 )); do
+            divisor=$((divisor * 1024))
+            unit=$((unit + 1))
+        done
+        if (( unit == 0 )); then
+            printf '%sB' "$bytes"
+        elif (( bytes < divisor * 10 )); then
+            _ratio_to_fixed_into result "$bytes" "$divisor" 1
+            printf '%s%s' "$result" "${units[unit]}"
+        else
+            _ratio_to_fixed_into result "$bytes" "$divisor" 0
+            printf '%s%s' "$result" "${units[unit]}"
+        fi
         return 0
     fi
     result=$(awk -v b="$bytes" 'BEGIN {
@@ -1015,14 +1482,17 @@ format_percent_suffix() {
 # MIB 必须是有限的非负数，否则返回 "-"。
 # 用法：gib=$(format_mib_as_gib 81920)
 format_mib_as_gib() {
-    local mib=${1-} result
+    local mib=${1-} result scaled_mib
     if ! is_number "$mib" || [[ $mib == -* ]]; then
         printf '%s' '-'
         return 0
     fi
-    result=$(awk -v m="$mib" 'BEGIN { printf "%.1f", m / 1024 }' 2>/dev/null) ||
-        result='-'
-    nonfinite_as_dash "$result"
+    if _number_to_scaled_into scaled_mib "$mib" 3; then
+        _ratio_to_fixed_into result "$scaled_mib" 1024000 1
+        printf '%s' "$result"
+        return 0
+    fi
+    printf '%s' '-'
 }
 
 # shellcheck shell=bash
@@ -1045,10 +1515,23 @@ demo_gpu_rows() {
 #       < <(collect_gpu_rows)
 collect_gpu_rows() {
     local raw=''
+    (( REPORT_GPU_ENABLED == 1 )) || return 0
     if command -v nvidia-smi >/dev/null 2>&1; then
-        raw=$(LC_ALL=C nvidia-smi \
-            --query-gpu=name,memory.total,memory.used,utilization.gpu,clocks.max.graphics \
-            --format=csv,noheader,nounits 2>/dev/null) || raw=''
+        if (( REPORT_GPU_TIMEOUT > 0 )) &&
+            command -v timeout >/dev/null 2>&1; then
+            raw=$(LC_ALL=C timeout "${REPORT_GPU_TIMEOUT}s" nvidia-smi \
+                --query-gpu=name,memory.total,memory.used,utilization.gpu,clocks.max.graphics \
+                --format=csv,noheader,nounits 2>/dev/null) || raw=''
+        elif (( REPORT_GPU_TIMEOUT > 0 )); then
+            raw=$(LC_ALL=C perl -e 'alarm shift; exec @ARGV; exit 127' \
+                "$REPORT_GPU_TIMEOUT" nvidia-smi \
+                --query-gpu=name,memory.total,memory.used,utilization.gpu,clocks.max.graphics \
+                --format=csv,noheader,nounits 2>/dev/null) || raw=''
+        else
+            raw=$(LC_ALL=C nvidia-smi \
+                --query-gpu=name,memory.total,memory.used,utilization.gpu,clocks.max.graphics \
+                --format=csv,noheader,nounits 2>/dev/null) || raw=''
+        fi
         if [ -n "$raw" ]; then
             printf '%s\n' "$raw" | awk -F', *' '
                 {
@@ -1083,11 +1566,11 @@ format_gpu_frequency() {
         return 0
     fi
     if (( min_mhz > 0 && max_mhz > 0 )); then
-        min_ghz=$(awk -v m="$min_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
-        max_ghz=$(awk -v m="$max_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
+        _mhz_to_ghz_into min_ghz "$min_mhz"
+        _mhz_to_ghz_into max_ghz "$max_mhz"
         printf '%s–%s GHz' "$min_ghz" "$max_ghz"
     elif (( max_mhz > 0 )); then
-        max_ghz=$(awk -v m="$max_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
+        _mhz_to_ghz_into max_ghz "$max_mhz"
         printf 'MAX %s GHz' "$max_ghz"
     else
         printf '%s' '-'
@@ -1214,14 +1697,14 @@ disk_usage_summary() {
     local mounts=$1 usage used_k avail_k total_k percent
     usage=$(disk_usage_values "$mounts")
     if [ -z "$usage" ]; then
-        printf '\t-\t-\n'
+        printf '%s\t%s\t%s\n' '-' '-' '-'
         return
     fi
 
     read -r used_k avail_k total_k <<<"$usage"
     percent=$(percent_of "$used_k" "$total_k")
     printf '%s\t%s\t%s\n' \
-        "$percent" \
+        "${percent:--}" \
         "$(human_bytes "$((used_k * 1024))")" \
         "$(human_bytes "$((avail_k * 1024))")"
 }
@@ -1259,7 +1742,7 @@ physical_disk_rows() {
 
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$name" "$(human_bytes "$size")" "$media" "$mounts" \
-            "$percent" "$used_h" "$avail_h" "$formats"
+            "${percent:--}" "${used_h:--}" "${avail_h:--}" "$formats"
     done < <(LC_ALL=C lsblk -dn -b -o NAME,SIZE,ROTA,TYPE,MODEL 2>/dev/null)
 }
 
@@ -1326,12 +1809,15 @@ MEM_WARN_PERCENT=10
 # 状态只依据 available 百分比，不依据 used。
 # 用法：status=$(memory_status_text 8.8 20 10)
 memory_status_text() {
-    local percent=$1 ok=$2 warn=$3 state
-    state=$(awk -v p="$percent" -v ok="$ok" -v warn="$warn" 'BEGIN {
-        if (p >= ok) print "ok"
-        else if (p >= warn) print "warn"
-        else print "crit"
-    }')
+    local percent=$1 ok=$2 warn=$3 state='crit'
+    local scaled_percent
+    if _number_to_scaled_into scaled_percent "$percent" 1; then
+        if (( scaled_percent >= ok * 10 )); then
+            state='ok'
+        elif (( scaled_percent >= warn * 10 )); then
+            state='warn'
+        fi
+    fi
     case "$state" in
         ok)   printf '%s●可用内存正常%s' "$C_OK" "$C_RESET" ;;
         warn) printf '%s●可用内存偏紧%s' "$C_WARN" "$C_RESET" ;;
@@ -1412,6 +1898,7 @@ add_field 'SYSTEM UUID' "$system_uuid"
 add_field 'UPTIME'      "$uptime"
 add_field 'HOSTNAME'    "$hostname"     1
 primary_ip=''
+_profile_begin 'network'
 while IFS=$'\t' read -r nic_name nic_ip; do
     [ -n "$nic_name" ] || continue
     [ -n "$primary_ip" ] || primary_ip=$nic_ip
@@ -1421,6 +1908,7 @@ if [ -z "$primary_ip" ]; then
     add_field 'NIC' '-'
     primary_ip='UNKNOWN'
 fi
+_profile_end
 server_display="${C_K}SERVER${C_RESET} ${C_V}${login_user}@${hostname}·${primary_ip}${C_RESET}"
 client_display="${C_MUTED}CLIENT ${login_client}${C_RESET}"
 for i in "${!cpu_models[@]}"; do
@@ -1443,6 +1931,7 @@ GPU_MEM_ROWS=()
 GPU_UTIL_ROWS=()
 GPU_IDENTITY_LINES=()
 gpu_index=0
+_profile_begin 'gpu'
 while IFS=$'\t' read -r gpu_name gpu_total gpu_used gpu_util \
     gpu_min_mhz gpu_max_mhz; do
     [ -n "$gpu_name" ] || continue
@@ -1465,6 +1954,7 @@ done < <(collect_gpu_rows)
 if [ "${#GPU_RECORDS[@]}" -eq 0 ]; then
     add_field 'GPU' '-' 1
 fi
+_profile_end
 
 # 内存区：TOTAL 带健康状态，其余行在第二轮补百分比。
 add_field 'MEM TOTAL'   "$total_display" 1
@@ -1488,6 +1978,8 @@ DISK_BAR_PCTS=()
 DISK_DEVICE_ROWS=()
 DISK_SPACE_ROWS=()
 DISK_MOUNTS=()
+DISK_PCTS=()
+_profile_begin 'disk collect'
 while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
     disk_pct disk_used disk_avail disk_format; do
     [ -n "$disk_name" ] || continue
@@ -1498,8 +1990,9 @@ while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
         "TOTAL $disk_size"$'\t'"USED $disk_used"$'\t'"AVAIL $disk_avail"
     )
     DISK_MOUNTS+=("${disk_mounts//,/, }")
-    DISK_BAR_PCTS+=("$disk_pct")
+    DISK_PCTS+=("$disk_pct")
 done < <(physical_disk_rows)
+_profile_end
 
 # [TABLE] format_disk_columns C1 C2 C3 -> 使用 DISK_COL*_W 补齐后拼接。
 # 用法：line=$(format_disk_columns "DISK $name" "TYPE $media" "FORMAT $fmt")
@@ -1512,6 +2005,7 @@ format_disk_columns() {
 
 # 三列宽度由 DEVICE 和 SPACE 两类记录共同决定，保证上下两行用同一组
 # 分隔符位置。记录内部使用 TAB，因此挂载点或型号中的空格不会干扰分列。
+_profile_begin 'disk layout'
 if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
     DISK_COL1_W=$(max_tsv_column_width 0 \
         "${DISK_DEVICE_ROWS[@]}" "${DISK_SPACE_ROWS[@]}")
@@ -1531,9 +2025,10 @@ if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
             "$(color_kv_segments "$dev_line")" "$disk_break"
         add_field 'SPACE' \
             "$(color_kv_segments "$space_line")"
-        if is_number "${DISK_BAR_PCTS[i]}"; then
+        if is_number "${DISK_PCTS[i]}"; then
             add_field 'DISK USAGE' ''
             DISK_BAR_ROWS+=("$FIELD_INDEX")
+            DISK_BAR_PCTS+=("${DISK_PCTS[i]}")
         else
             add_field 'DISK USAGE' '-'
         fi
@@ -1546,6 +2041,7 @@ else
         "$(color_kv_segments 'TOTAL - · USED - · AVAIL -')"
     add_field 'MOUNTS' '-'
 fi
+_profile_end
 
 # shellcheck shell=bash
 # ── [TABLE] 布局测量 ───────────────────────────────────────────────────
@@ -1590,7 +2086,7 @@ ensure_data_width() {
 # ── 表格绘制 ───────────────────────────────────────────────────────────
 
 # [TABLE] print_divider LEFT MIDDLE RIGHT [CHAR] -> 两列之间的横线。
-# 名字列和数据列各加一格内边距，宽度与 print_row 一致。
+# 名字列和数据列各加一格内边距，宽度与字段行一致。
 # 用法：print_divider "$MID_LEFT" "$MID_MID" "$MID_RIGHT"
 print_divider() {
     local left=$1 middle=$2 right=$3
@@ -1627,57 +2123,54 @@ print_merged_divider() {
         "$right"
 }
 
-# [TABLE] print_centered TEXT -> 跨两列居中输出一行。
-# TEXT 可以含 ANSI；宽度计算会忽略控制码。
-# 用法：print_centered "${C_TITLE}${title}${C_RESET}"
-print_centered() {
-    local text fitted inner width left right
-    inner=$((NAME_W + DATA_W + 5))  # 左右边框之间的显示列数
-    fitted=$(fit_display "$1" "$inner")
-    width=$(display_width "$fitted")
-    left=$(((inner - width) / 2))
-    right=$((inner - width - left))
-    printf '│%*s%s%*s│\n' "$left" '' "$fitted" "$right" ''
-}
+# [TABLE] _format_report_lines TEXT... -> 一次 Perl 输出全部渲染行。
+# 记录以 NUL 分隔，开头 C 表示居中行、R 表示字段行。这样标题区和表格
+# 共用一次 Perl 启动，同时分隔线仍由 Bash 控制。
+_format_report_lines() {
+    local inner=$((NAME_W + DATA_W + 5))
+    local center_count=$#
+    local row_count=${#FIELD_LABELS[@]}
 
-# [TABLE] print_row LABEL VALUE -> 输出一条完整的两列表格行。
-#   * 名字和值都先按显示宽度截断，保证永远不会顶破右边界；
-#   * 再按显示宽度补空格，因此中文、ANSI 颜色、图标混排都能对齐；
-#   * 原始 FIELD_VALUES 不会被修改，截断只影响这一行的显示内容。
-# 用法：print_row 'OS' 'Ubuntu 24.04'
-print_row() {
-    local name data
-    name=$(fit_display "$1" "$NAME_W")
-    data=$(fit_display "$2" "$DATA_W")
-    printf '│ %s │ %s │\n' \
-        "$(pad_display "$name" "$NAME_W")" \
-        "$(pad_display "$data" "$DATA_W")"
+    printf '%s\0' "$@" "${FIELD_LABELS[@]}" "${FIELD_VALUES[@]}" |
+        TABLE_MODE=render-report \
+            TABLE_INNER="$inner" \
+            TABLE_CENTER_COUNT="$center_count" \
+            TABLE_ROWS="$row_count" \
+            TABLE_NAME_W="$NAME_W" \
+            TABLE_DATA_W="$DATA_W" \
+            perl -CS -e "$DISPLAY_WIDTH_PERL"
 }
 
 # [TABLE] bar USED TOTAL [WIDTH] -> 无颜色横向百分比条。
 # 条形字符本身都是单列字符，所以这里可以直接用 repeat_char()；
-# 百分比和块数交给 awk 计算，避免 Bash 只支持整数算术造成精度问题。
+# 普通十进制先转成定点整数计算块数；异常输入才回退 awk。
 # 省略 WIDTH 时使用 DATA_W。
 # 用法：graph=$(bar 42.5 100 20)
 bar() {
     local used=${1-0} total=${2-0} width=${3:-${DATA_W:-0}}
-    local percent blocks
+    local blocks scaled_used scaled_total
 
     is_number "$used" || used=0
     is_number "$total" || total=0
     [[ $width =~ ^[0-9]+$ ]] || width=0
 
-    percent=$(awk -v u="$used" -v t="$total" 'BEGIN {
-        if (t <= 0) { print "0"; exit }
-        printf "%.2f", (u / t) * 100
-    }')
-
-    blocks=$(awk -v p="$percent" -v w="$width" 'BEGIN {
-        n = int((p / 100) * w)
-        if (n < 0) n = 0
-        if (n > w) n = w
-        print n
-    }')
+    if _number_to_scaled_into scaled_used "$used" 6 &&
+        _number_to_scaled_into scaled_total "$total" 6; then
+        if (( scaled_total <= 0 || width <= 0 || scaled_used <= 0 )); then
+            blocks=0
+        else
+            blocks=$(((scaled_used * width) / scaled_total))
+            (( blocks > width )) && blocks=$width
+        fi
+    else
+        blocks=$(awk -v u="$used" -v t="$total" -v w="$width" 'BEGIN {
+            if (t <= 0 || w <= 0) { print 0; exit }
+            n = int(((u / t) * 100 / 100) * w)
+            if (n < 0) n = 0
+            if (n > w) n = w
+            print n
+        }')
+    fi
 
     printf '%s%s' \
         "$(repeat_char '█' "$blocks")" \
@@ -1870,12 +2363,15 @@ stacked_bar() {
 
 # 先测量纯数据，再生成与 DATA_W 等宽的条形图，填入对应的值槽位。
 # 用 add_field 时记录下来的下标定位，不写死 6/8/10，后续增删字段更安全。
+_profile_begin 'layout measure'
 measure_fields
 for gpu_identity in "${GPU_IDENTITY_LINES[@]}"; do
     ensure_data_width "$gpu_identity"
 done
 ensure_centered_width "$server_display"
 ensure_centered_width "$client_display"
+_profile_end
+_profile_begin 'format values'
 FIELD_VALUES[MEM_USED_ROW]=$(align_mem_percent \
     "$used_display" "$mem_used_percent" "$C_BAR_USED")
 FIELD_VALUES[MEM_CACHE_ROW]=$(align_mem_percent \
@@ -1910,6 +2406,7 @@ FIELD_VALUES[MEM_BAR_ROW]=$(
 FIELD_VALUES[MEM_BAR_ROW]+=$MEM_PERCENT_SUFFIX
 
 FIELD_VALUES[MEM_TOTAL_ROW]=$(align_row_ends "$total_display" "$mem_status")
+_profile_end
 
 # ── [REPORT] 最终渲染 ──────────────────────────────────────────────────
 
@@ -1920,10 +2417,29 @@ render_report() {
     local title='服务器运行报告'
     local subtitle='效能组·Devops Platform Service'
     local environment='PRODUCTION'
+    local line
+    local -a centered_lines=()
+    local -a field_lines=()
+    local -a centered_texts=()
+
+    centered_texts=(
+        "${C_TITLE}${title}${C_RESET}"
+        "${C_ACCENT}${subtitle}${C_RESET}"
+        "${C_ENV}ENVIRONMENT · ${environment}${C_RESET}"
+        "$server_display"
+        "$client_display"
+    )
+
+    # 标题、页脚和所有字段行合并到一个 Perl 进程。
+    while IFS= read -r -d '' line; do
+        case ${line:0:1} in
+            C) centered_lines+=("${line:1}") ;;
+            R) field_lines+=("${line:1}") ;;
+        esac
+    done < <(_format_report_lines "${centered_texts[@]}")
 
     print_header
-    print_centered "${C_TITLE}${title}${C_RESET}"
-    print_centered "${C_ACCENT}${subtitle}${C_RESET}"
+    printf '%s\n' "${centered_lines[0]}" "${centered_lines[1]}"
     print_divider "$MID_LEFT" "$TOP_MID" "$MID_RIGHT"
 
     for i in "${!FIELD_LABELS[@]}"; do
@@ -1933,15 +2449,19 @@ render_report() {
                 2) print_dashed_divider ;;
             esac
         fi
-        print_row "${FIELD_LABELS[i]}" "${FIELD_VALUES[i]}"
+        printf '%s\n' "${field_lines[i]}"
     done
 
     # 页脚跨两列：上方竖线用 ┴ 结束，底边使用连续横线。
     print_divider "$MID_LEFT" "$BOTTOM_MID" "$MID_RIGHT"
-    print_centered "${C_ENV}ENVIRONMENT · ${environment}${C_RESET}"
-    print_centered "$server_display"
-    print_centered "$client_display"
+    printf '%s\n' \
+        "${centered_lines[2]}" \
+        "${centered_lines[3]}" \
+        "${centered_lines[4]}"
     print_merged_divider "$BOTTOM_LEFT" "$BOTTOM_RIGHT"
 }
 
+_profile_begin 'render'
 render_report
+_profile_end
+_profile_total

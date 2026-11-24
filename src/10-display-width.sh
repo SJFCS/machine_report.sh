@@ -1,9 +1,14 @@
 # shellcheck shell=bash
 # ── 显示宽度引擎 ───────────────────────────────────────────────────────
 #
-# 这段 Perl 从标准输入读取一个 UTF-8 字符串，由 TABLE_MODE 决定行为：
-#   width：只输出该字符串的显示列数
-#   fit  ：在 TABLE_LIMIT 列以内截断，并输出可以安全打印的字符串
+# 这段 Perl 从标准输入读取 UTF-8 字符串，由 TABLE_MODE 决定行为：
+#   width       ：只输出该字符串的显示列数
+#   fit         ：在 TABLE_LIMIT 列以内截断，并输出可以安全打印的字符串
+#   batch-width ：读取 NUL 分隔的多个字符串，逐项输出 NUL 分隔的宽度
+#   render-report：一次输出居中行和字段行，减少一次 Perl 启动
+#
+# 渲染路径把整张表交给一个 Perl 进程处理，避免每个单元格启动一次解释器。
+# 纯 ASCII 和已知单列字符使用下面基于 ${#} 的 Bash 快路径。
 #
 # 采用 Perl 的 Unicode 属性而不是手写简体中文区间，原因有三点：
 #   * 能覆盖中文、日文、韩文、全角符号以及以后新增的宽字符；
@@ -147,25 +152,26 @@ sub tokenize {
     return @tokens;
 }
 
-my @tokens = tokenize($text);
+sub text_width {
+    my ($value) = @_;
+    my $width = 0;
+    $width += $_->[1] for tokenize($value);
+    return $width;
+}
 
-if ($mode eq 'fit') {
-    $limit = int($limit);
-    if ($limit <= 0) {
-        print '';
-        exit;
-    }
+sub fit_text {
+    my ($value, $max) = @_;
+    $max = int($max);
+    return '' if $max <= 0;
 
+    my @tokens = tokenize($value);
     my $total = 0;
     $total += $_->[1] for @tokens;
-    if ($total <= $limit) {
-        print $text;
-        exit;
-    }
+    return $value if $total <= $max;
 
     # 预留一列给省略号。最后一个完整字形簇之后可能还有颜色码，
     # 所以只在确实遇到过 ANSI 时补一个 reset，避免颜色泄漏到后续边框。
-    my $budget = $limit - 1;
+    my $budget = $max - 1;
     my $width = 0;
     my $out = '';
     my $used_ansi = 0;
@@ -182,31 +188,204 @@ if ($mode eq 'fit') {
     }
     $out .= '…';
     $out .= "\e[0m" if $used_ansi;
-    print $out;
+    return $out;
+}
+
+# 表格行需要“截断 + 补空格”。把两步合成一次 token 化，避免每个单元格
+# 在同一个 Perl 进程里还要重复扫描字符串。
+sub fit_and_pad {
+    my ($value, $max) = @_;
+    $max = int($max);
+    return '' if $max <= 0;
+
+    my @tokens = tokenize($value);
+    my $total = 0;
+    $total += $_->[1] for @tokens;
+    return $value . (' ' x ($max - $total)) if $total <= $max;
+
+    my $budget = $max - 1;
+    my $width = 0;
+    my $out = '';
+    my $used_ansi = 0;
+    for my $token (@tokens) {
+        my ($chunk, $chunk_width) = @$token;
+        if ($chunk_width == 0) {
+            $out .= $chunk;
+            $used_ansi = 1 if $chunk =~ /\e/;
+            next;
+        }
+        last if $width + $chunk_width > $budget;
+        $out .= $chunk;
+        $width += $chunk_width;
+    }
+    $out .= '…';
+    $out .= "\e[0m" if $used_ansi;
+    $out .= ' ' x ($max - $width - 1) if $max > $width + 1;
+    return $out;
+}
+
+sub centered_line {
+    my ($value, $inner) = @_;
+    $inner = int($inner);
+    return '' if $inner <= 0;
+
+    my $fitted = fit_text($value, $inner);
+    my $width = text_width($fitted);
+    my $left = int(($inner - $width) / 2);
+    my $right = $inner - $width - $left;
+    return '│' . (' ' x $left) . $fitted . (' ' x $right) . '│';
+}
+
+sub input_records {
+    my @records = split(/\0/, $text, -1);
+    pop @records if @records && $records[-1] eq '';
+    return @records;
+}
+
+if ($mode eq 'batch-width') {
+    print text_width($_), "\0" for input_records();
     exit;
 }
 
-my $width = 0;
-$width += $_->[1] for @tokens;
-print $width;
+if ($mode eq 'render-report') {
+    my $inner = int($ENV{TABLE_INNER} || 0);
+    my $center_count = int($ENV{TABLE_CENTER_COUNT} || 0);
+    my $row_count = int($ENV{TABLE_ROWS} || 0);
+    my $name_width = int($ENV{TABLE_NAME_W} || 0);
+    my $data_width = int($ENV{TABLE_DATA_W} || 0);
+    my @records = input_records();
+    my @centered = splice(@records, 0, $center_count);
+    my @labels = splice(@records, 0, $row_count);
+
+    print 'C', centered_line($_, $inner), "\0" for @centered;
+    for my $i (0 .. $row_count - 1) {
+        my $label = defined $labels[$i] ? $labels[$i] : '';
+        my $value = defined $records[$i] ? $records[$i] : '';
+        print 'R',
+            '│ ',
+            fit_and_pad($label, $name_width),
+            ' │ ',
+            fit_and_pad($value, $data_width),
+            ' │', "\0";
+    }
+    exit;
+}
+
+if ($mode eq 'fit') {
+    print fit_text($text, $limit);
+    exit;
+}
+
+print text_width($text);
 PERL
 
+# Bash 正则先存入变量：直接把带空格的字符区间写在 [[ =~ ]] 里会被
+# Bash 当成语法分隔符。ANSI 清理和单列宽度判断复用这两个表达式。
+TABLE_ASCII_RE='^[ -~]*$'
+TABLE_CSI_RE=$'\e\\[[0-?]*[ -/]*[@-~]'
+TABLE_OSC_RE=$'\e\\][^\a]*(\a|\e\\\\)'
+
+# [TABLE] _strip_ansi_into VAR TEXT -> 去掉 CSI/OSC 控制序列。
+_strip_ansi_into() {
+    local __var=$1 __strip_text=${2-}
+    if [[ $__strip_text == *$'\e'* ]]; then
+        while [[ $__strip_text =~ $TABLE_CSI_RE ]]; do
+            __strip_text=${__strip_text/"${BASH_REMATCH[0]}"/}
+        done
+        while [[ $__strip_text =~ $TABLE_OSC_RE ]]; do
+            __strip_text=${__strip_text/"${BASH_REMATCH[0]}"/}
+        done
+    fi
+    printf -v "$__var" '%s' "$__strip_text"
+}
+
+# [TABLE] _single_width_filter_into VAR TEXT -> 保留已知单列字符。
+# 用于快速判断一段文本是否只由 ASCII、边框和进度符号组成；其他宽字符、
+# 组合符或控制字符会变成“?”，以便调用方通过比较识别是否走了快路径。
+_single_width_filter_into() {
+    local __var=$1 __single_text __single_char __single_out=''
+    _strip_ansi_into __single_text "${2-}"
+
+    while [[ -n $__single_text ]]; do
+        __single_char=${__single_text:0:1}
+        __single_text=${__single_text:1}
+        case $__single_char in
+            [\ -~]) __single_out+=$__single_char ;;
+            '─'|'│'|'┌'|'┐'|'└'|'┘'|'├'|'┤'|'┬'|'┴'|'┼'|'┄')
+                __single_out+=$__single_char
+                ;;
+            '█'|'▓'|'░'|'·'|'…'|'●'|'–')
+                __single_out+=$__single_char
+                ;;
+            *) __single_out+='?' ;;
+        esac
+    done
+    printf -v "$__var" '%s' "$__single_out"
+}
+
+# [TABLE] _simple_display_width_into VAR TEXT -> 单列字符的 Bash 快路径。
+# 去掉 ANSI 后，如果剩余字符全部在单列白名单中，此时 ${#text} 就是显示
+# 宽度；发现宽字符或组合符时返回 1，交给 Perl 精确计算。
+_simple_display_width_into() {
+    local __var=$1 plain allowed
+    _strip_ansi_into plain "${2-}"
+    _single_width_filter_into allowed "$plain"
+    [[ $allowed == "$plain" ]] || return 1
+    printf -v "$__var" '%s' "${#plain}"
+}
+
+# [TABLE] _truncate_bash_into VAR TEXT MAX MARK -> ASCII 快路径截断。
+_truncate_bash_into() {
+    local __var=$1 __trunc_text=$2 max=$3 mark=$4 __trunc_value
+    if (( max <= 0 )); then
+        __trunc_value=''
+    elif (( ${#__trunc_text} > max )); then
+        __trunc_value="${__trunc_text:0:max-1}${mark}"
+    else
+        __trunc_value=$__trunc_text
+    fi
+    printf -v "$__var" '%s' "$__trunc_value"
+}
+
 # [TABLE] display_width TEXT -> 输出终端显示列数。
-# 使用管道而不是命令行参数，避免空格、引号、反斜杠或 ANSI 被二次解释。
+# 纯 ASCII 和已确认的单列 Unicode 不启动进程；复杂文本交给 Perl。
 # 用法：columns=$(display_width "$cell")
 display_width() {
-    local text=$1
+    local text=${1-} simple_width
+    if [[ $text =~ $TABLE_ASCII_RE ]]; then
+        printf '%s' "${#text}"
+        return
+    fi
+    if _simple_display_width_into simple_width "$text"; then
+        printf '%s' "$simple_width"
+        return
+    fi
     printf '%s' "$text" |
         TABLE_MODE=width perl -CS -e "$DISPLAY_WIDTH_PERL"
+}
+
+# [TABLE] _fit_display_into VAR TEXT MAX -> 截断后写入指定变量。
+_fit_display_into() {
+    local __var=$1 __fit_text=$2 max=${3:-0}
+    local __fit_result
+    [[ $max =~ ^[0-9]+$ ]] || max=0
+
+    if [[ $__fit_text =~ $TABLE_ASCII_RE ]]; then
+        _truncate_bash_into "$__var" "$__fit_text" "$max" '…'
+        return
+    fi
+    __fit_result=$(printf '%s' "$__fit_text" |
+        TABLE_MODE=fit TABLE_LIMIT="$max" \
+            perl -CS -e "$DISPLAY_WIDTH_PERL")
+    printf -v "$__var" '%s' "$__fit_result"
 }
 
 # [TABLE] fit_display TEXT MAX -> 按显示列数截断，超宽时以“…”结尾。
 # 用法：fitted=$(fit_display "$long_text" 40)
 fit_display() {
-    local text=$1 max=$2
-    printf '%s' "$text" |
-        TABLE_MODE=fit TABLE_LIMIT="$max" \
-            perl -CS -e "$DISPLAY_WIDTH_PERL"
+    local text=${1-} max=${2:-0} fitted
+    _fit_display_into fitted "$text" "$max"
+    printf '%s' "$fitted"
 }
 
 # [TABLE] repeat_char CHAR COUNT -> 重复单列字符，用于边框和条形图。
@@ -219,26 +398,69 @@ repeat_char() {
     printf '%s' "${out// /$char}"
 }
 
+# [TABLE] _pad_display_into VAR TEXT WIDTH [CURRENT_WIDTH]
+# 左对齐并用 ASCII 空格补齐；CURRENT_WIDTH 可跳过再次测量。
+_pad_display_into() {
+    local __var=$1 __pad_text=$2 width=${3:-0} current=${4-}
+    [[ $width =~ ^[0-9]+$ ]] || width=0
+
+    if [[ $__pad_text =~ $TABLE_ASCII_RE ]]; then
+        current=${#__pad_text}
+    elif [[ -z $current ]]; then
+        current=$(display_width "$__pad_text")
+    fi
+
+    if (( current < width )); then
+        printf -v "$__var" '%s%*s' "$__pad_text" "$((width - current))" ''
+    else
+        printf -v "$__var" '%s' "$__pad_text"
+    fi
+}
+
 # [TABLE] pad_display TEXT WIDTH -> 左对齐并用 ASCII 空格补齐。
 # 用法：padded=$(pad_display "$text" 20)
 pad_display() {
-    local text=$1 width=$2 current
-    current=$(display_width "$text")
-    printf '%s' "$text"
-    if (( current < width )); then
-        printf '%*s' "$((width - current))" ''
+    local text=${1-} width=${2:-0} padded
+    _pad_display_into padded "$text" "$width"
+    printf '%s' "$padded"
+}
+
+# [TABLE] _display_widths_batch VALUE... -> 输出 NUL 分隔的宽度。
+# 纯 ASCII/单列文本批次不启动进程；复杂 Unicode/ANSI 只启动一个 Perl。
+_display_widths_batch() {
+    local text simple_width context_width needs_perl=0
+    local -a computed=()
+
+    for text in "$@"; do
+        if [[ $text =~ $TABLE_ASCII_RE ]]; then
+            computed+=("${#text}")
+        elif _simple_display_width_into simple_width "$text"; then
+            computed+=("$simple_width")
+        else
+            needs_perl=1
+            break
+        fi
+    done
+    if (( needs_perl == 0 )); then
+        for context_width in "${computed[@]}"; do
+            printf '%s\0' "$context_width"
+        done
+        return
     fi
+
+    printf '%s\0' "$@" |
+        TABLE_MODE=batch-width perl -CS -e "$DISPLAY_WIDTH_PERL"
 }
 
 # [TABLE] max_display_width VALUE... -> 返回最大显示列数。
 # 传入数组时必须写成 "${array[@]}"，避免元素内空格被拆成新参数。
 # 用法：width=$(max_display_width "${FIELD_LABELS[@]}")
 max_display_width() {
-    local value width max=0
-    for value in "$@"; do
-        width=$(display_width "$value")
+    local width max=0
+    while IFS= read -r -d '' width; do
+        [[ $width =~ ^[0-9]+$ ]] || width=0
         (( width > max )) && max=$width
-    done
+    done < <(_display_widths_batch "$@")
     printf '%s' "$max"
 }
 
@@ -250,11 +472,19 @@ max_tsv_column_width() {
     shift
     local row width max=0
     local -a cells=()
+    local -a column_values=()
     for row in "$@"; do
         IFS=$'\t' read -r -a cells <<<"$row"
-        width=$(display_width "${cells[column]:-}")
-        (( width > max )) && max=$width
+        column_values+=("${cells[column]:-}")
     done
+    if (( ${#column_values[@]} == 0 )); then
+        printf '0'
+        return
+    fi
+    while IFS= read -r -d '' width; do
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        (( width > max )) && max=$width
+    done < <(_display_widths_batch "${column_values[@]}")
     printf '%s' "$max"
 }
 

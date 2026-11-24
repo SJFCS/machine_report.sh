@@ -18,10 +18,23 @@ demo_gpu_rows() {
 #       < <(collect_gpu_rows)
 collect_gpu_rows() {
     local raw=''
+    (( REPORT_GPU_ENABLED == 1 )) || return 0
     if command -v nvidia-smi >/dev/null 2>&1; then
-        raw=$(LC_ALL=C nvidia-smi \
-            --query-gpu=name,memory.total,memory.used,utilization.gpu,clocks.max.graphics \
-            --format=csv,noheader,nounits 2>/dev/null) || raw=''
+        if (( REPORT_GPU_TIMEOUT > 0 )) &&
+            command -v timeout >/dev/null 2>&1; then
+            raw=$(LC_ALL=C timeout "${REPORT_GPU_TIMEOUT}s" nvidia-smi \
+                --query-gpu=name,memory.total,memory.used,utilization.gpu,clocks.max.graphics \
+                --format=csv,noheader,nounits 2>/dev/null) || raw=''
+        elif (( REPORT_GPU_TIMEOUT > 0 )); then
+            raw=$(LC_ALL=C perl -e 'alarm shift; exec @ARGV; exit 127' \
+                "$REPORT_GPU_TIMEOUT" nvidia-smi \
+                --query-gpu=name,memory.total,memory.used,utilization.gpu,clocks.max.graphics \
+                --format=csv,noheader,nounits 2>/dev/null) || raw=''
+        else
+            raw=$(LC_ALL=C nvidia-smi \
+                --query-gpu=name,memory.total,memory.used,utilization.gpu,clocks.max.graphics \
+                --format=csv,noheader,nounits 2>/dev/null) || raw=''
+        fi
         if [ -n "$raw" ]; then
             printf '%s\n' "$raw" | awk -F', *' '
                 {
@@ -56,11 +69,11 @@ format_gpu_frequency() {
         return 0
     fi
     if (( min_mhz > 0 && max_mhz > 0 )); then
-        min_ghz=$(awk -v m="$min_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
-        max_ghz=$(awk -v m="$max_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
+        _mhz_to_ghz_into min_ghz "$min_mhz"
+        _mhz_to_ghz_into max_ghz "$max_mhz"
         printf '%s–%s GHz' "$min_ghz" "$max_ghz"
     elif (( max_mhz > 0 )); then
-        max_ghz=$(awk -v m="$max_mhz" 'BEGIN { printf "%.2f", m / 1000 }')
+        _mhz_to_ghz_into max_ghz "$max_mhz"
         printf 'MAX %s GHz' "$max_ghz"
     else
         printf '%s' '-'
@@ -187,14 +200,14 @@ disk_usage_summary() {
     local mounts=$1 usage used_k avail_k total_k percent
     usage=$(disk_usage_values "$mounts")
     if [ -z "$usage" ]; then
-        printf '\t-\t-\n'
+        printf '%s\t%s\t%s\n' '-' '-' '-'
         return
     fi
 
     read -r used_k avail_k total_k <<<"$usage"
     percent=$(percent_of "$used_k" "$total_k")
     printf '%s\t%s\t%s\n' \
-        "$percent" \
+        "${percent:--}" \
         "$(human_bytes "$((used_k * 1024))")" \
         "$(human_bytes "$((avail_k * 1024))")"
 }
@@ -232,7 +245,7 @@ physical_disk_rows() {
 
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$name" "$(human_bytes "$size")" "$media" "$mounts" \
-            "$percent" "$used_h" "$avail_h" "$formats"
+            "${percent:--}" "${used_h:--}" "${avail_h:--}" "$formats"
     done < <(LC_ALL=C lsblk -dn -b -o NAME,SIZE,ROTA,TYPE,MODEL 2>/dev/null)
 }
 
