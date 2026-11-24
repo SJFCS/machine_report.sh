@@ -281,12 +281,19 @@ PERL
 
 # Bash 正则先存入变量：直接把带空格的字符区间写在 [[ =~ ]] 里会被
 # Bash 当成语法分隔符。ANSI 清理和单列宽度判断复用这两个表达式。
+# 这些区间必须在 C locale 下匹配，UTF-8 locale 的排序规则不同。
 TABLE_ASCII_RE='^[ -~]*$'
 TABLE_CSI_RE=$'\e\\[[0-?]*[ -/]*[@-~]'
 TABLE_OSC_RE=$'\e\\][^\a]*(\a|\e\\\\)'
 
+_is_ascii_text() {
+    local LC_ALL=C
+    [[ ${1-} =~ $TABLE_ASCII_RE ]]
+}
+
 # [TABLE] _strip_ansi_into VAR TEXT -> 去掉 CSI/OSC 控制序列。
 _strip_ansi_into() {
+    local LC_ALL=C
     local __var=$1 __strip_text=${2-}
     if [[ $__strip_text == *$'\e'* ]]; then
         while [[ $__strip_text =~ $TABLE_CSI_RE ]]; do
@@ -303,6 +310,7 @@ _strip_ansi_into() {
 # 用于快速判断一段文本是否只由 ASCII、边框和进度符号组成；其他宽字符、
 # 组合符或控制字符会变成“?”，以便调用方通过比较识别是否走了快路径。
 _single_width_filter_into() {
+    local LC_ALL=C
     local __var=$1 __single_text __single_char __single_out=''
     _strip_ansi_into __single_text "${2-}"
 
@@ -352,7 +360,7 @@ _truncate_bash_into() {
 # 用法：columns=$(display_width "$cell")
 display_width() {
     local text=${1-} simple_width
-    if [[ $text =~ $TABLE_ASCII_RE ]]; then
+    if _is_ascii_text "$text"; then
         printf '%s' "${#text}"
         return
     fi
@@ -370,7 +378,7 @@ _fit_display_into() {
     local __fit_result
     [[ $max =~ ^[0-9]+$ ]] || max=0
 
-    if [[ $__fit_text =~ $TABLE_ASCII_RE ]]; then
+    if _is_ascii_text "$__fit_text"; then
         _truncate_bash_into "$__var" "$__fit_text" "$max" '…'
         return
     fi
@@ -404,7 +412,7 @@ _pad_display_into() {
     local __var=$1 __pad_text=$2 width=${3:-0} current=${4-}
     [[ $width =~ ^[0-9]+$ ]] || width=0
 
-    if [[ $__pad_text =~ $TABLE_ASCII_RE ]]; then
+    if _is_ascii_text "$__pad_text"; then
         current=${#__pad_text}
     elif [[ -z $current ]]; then
         current=$(display_width "$__pad_text")
@@ -432,7 +440,7 @@ _display_widths_batch() {
     local -a computed=()
 
     for text in "$@"; do
-        if [[ $text =~ $TABLE_ASCII_RE ]]; then
+        if _is_ascii_text "$text"; then
             computed+=("${#text}")
         elif _simple_display_width_into simple_width "$text"; then
             computed+=("$simple_width")

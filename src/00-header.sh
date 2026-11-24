@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # shellcheck disable=SC2034
-#
-#
-# 终端“服务器报告”表格 + 条形图示例。
-# https://github.com/usgraphics/usgc-machine-report
-
-#
+# -*- coding: utf-8 -*-
+# ============================================================
+# File    : machine_report.sh
+# Author  : song.jinfeng@outlook.com
+# Date    : BUILD_TIME
+# Version : BUILD_VERSION
+# Repo    : https://github.com/SJFCS/machine_report.sh.git
+# Desc    : It displays useful machine information right in the terminal session. 
+# ============================================================
 # 本脚本的约定：
 #   1. 所有可能含中文、ANSI 或图标的宽度、补齐、居中、截断都经过
 #      display_width() / fit_display()。单列文本走 Bash 快路径，复杂

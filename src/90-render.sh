@@ -7,9 +7,11 @@
 # 用 add_field 时记录下来的下标定位，不写死 6/8/10，后续增删字段更安全。
 _profile_begin 'layout measure'
 measure_fields
-for gpu_identity in "${GPU_IDENTITY_LINES[@]}"; do
-    ensure_data_width "$gpu_identity"
-done
+if (( ${#GPU_IDENTITY_LINES[@]} > 0 )); then
+    for gpu_identity in "${GPU_IDENTITY_LINES[@]}"; do
+        ensure_data_width "$gpu_identity"
+    done
+fi
 ensure_centered_width "$server_display"
 ensure_centered_width "$client_display"
 _profile_end
@@ -57,7 +59,7 @@ _profile_end
 # 用法：render_report
 render_report() {
     local title='服务器运行报告'
-    local subtitle='效能组·Devops Platform Service'
+    local subtitle='PVE Platform'
     local environment='PRODUCTION'
     local line
     local -a centered_lines=()

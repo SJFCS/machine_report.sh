@@ -25,7 +25,7 @@ if [ -z "$primary_ip" ]; then
     primary_ip='UNKNOWN'
 fi
 _profile_end
-server_display="${C_K}SERVER${C_RESET} ${C_V}${login_user}@${hostname}·${primary_ip}${C_RESET}"
+server_display="${C_K}SERVER${C_RESET} ${C_V}${login_user}@${hostname} ${primary_ip}${C_RESET}"
 client_display="${C_MUTED}CLIENT ${login_client}${C_RESET}"
 for i in "${!cpu_models[@]}"; do
     break_before=0

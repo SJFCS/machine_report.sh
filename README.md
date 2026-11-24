@@ -1,7 +1,7 @@
 # 服务器报告
 
-`report.sh` 是由 `src/` 下的源码片段合并生成的单文件脚本，请勿直接修改
-生成的 `report.sh`。
+`machine_report.sh` 是由 `src/` 下的源码片段合并生成的单文件脚本，请勿
+直接修改生成文件。
 
 ## 构建
 
@@ -11,7 +11,80 @@
 
 构建脚本按文件名排序合并 `src/*.sh`，因此新增源码片段时应使用数字前缀，
 并确保文件名顺序与依赖顺序一致。合并后会先运行 `bash -n` 检查语法，再
-原子替换目标文件并设置可执行权限。
+原子替换目标文件并设置可执行权限。构建日期由 `build.sh` 每次自动写入
+文件头，版本号则在 `build.sh` 的 `VERSION` 变量中维护。
+
+## 安装
+
+从 GitHub Raw 安装到当前用户，并注册 `mreport` 快捷命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SJFCS/machine_report.sh/main/install.sh | bash
+```
+
+默认安装位置：
+
+- 报告：`~/.local/share/machine_report/machine_report.sh`
+- 命令：`~/.local/bin/mreport`
+- 启动配置：`~/.bashrc`、`~/.zshrc`
+
+安装器会在交互式终端启动时自动展示一次报告。临时关闭自动展示可设置
+`MREPORT_AUTORUN=0`；安装时使用 `--no-autostart` 可永久关闭。
+
+安装给所有用户，并注册到系统级 bash/zsh 启动配置：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SJFCS/machine_report.sh/main/install.sh | sudo bash -s -- --system
+```
+
+所有用户共用以下路径：
+
+- 报告：`/usr/local/lib/machine_report/machine_report.sh`
+- 命令：`/usr/local/bin/mreport`
+- 启动配置：`/etc/profile.d/machine_report.sh`，以及系统已有的
+  `/etc/zsh/zshrc` 或 `/etc/zshrc`
+
+也可以从本地安装：
+
+```bash
+sudo ./install.sh --system
+```
+
+从本地构建产物安装：
+
+```bash
+./install.sh --source ./machine_report.sh
+```
+
+安装后也可以随时手动执行：
+
+```bash
+mreport
+```
+
+## 卸载
+
+卸载当前用户的安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SJFCS/machine_report.sh/main/install.sh | bash -s -- --uninstall
+```
+
+卸载所有用户的安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SJFCS/machine_report.sh/main/install.sh | sudo bash -s -- --system --uninstall
+```
+
+在本地仓库中也可以直接卸载：
+
+```bash
+./install.sh --uninstall
+sudo ./install.sh --system --uninstall
+```
+
+卸载会删除 `mreport` 命令、报告文件和安装器写入的启动配置块，不会改动
+shell 配置中的其他内容。`--system --uninstall`
 
 ## 输出与依赖
 
@@ -23,12 +96,12 @@
 可关闭颜色，设置 `FORCE_COLOR=1` 可强制启用颜色。
 
 ```bash
-REPORT_MOCK_ENABLED=1 ./report.sh
-NO_COLOR=1 ./report.sh
-FORCE_COLOR=1 ./report.sh
-REPORT_PROFILE=1 ./report.sh >/dev/null
-REPORT_GPU_ENABLED=0 ./report.sh
-REPORT_GPU_TIMEOUT=5 ./report.sh
+REPORT_MOCK_ENABLED=1 ./machine_report.sh
+NO_COLOR=1 ./machine_report.sh
+FORCE_COLOR=1 ./machine_report.sh
+REPORT_PROFILE=1 ./machine_report.sh >/dev/null
+REPORT_GPU_ENABLED=0 ./machine_report.sh
+REPORT_GPU_TIMEOUT=5 ./machine_report.sh
 ```
 
 `REPORT_PROFILE=1` 会把操作系统、CPU、负载、内存、平台、网络、GPU、
@@ -57,3 +130,12 @@ GPU 数据继续。可用 `REPORT_GPU_TIMEOUT` 调整秒数，设为 `0` 可取�
 数值换算优先使用 Bash 内建定点运算；只有无法用整数精度安全表达或需要
 解析整段文本时才回退到 awk。标题、页脚和字段行合并为一次 Perl 渲染，
 避免按单元格或按行启动解释器。
+
+## 常用变量
+
+```bash
+# 耗时统计
+REPORT_PROFILE=1 
+# 关闭gpu查询
+REPORT_GPU_ENABLED=0
+```
