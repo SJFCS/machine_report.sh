@@ -196,6 +196,36 @@ collect_network_interfaces() {
     fi
 }
 
+# [HANDLER] collect_dns_servers -> 去重后以逗号分隔的 DNS 服务器地址。
+collect_dns_servers() {
+    local dns=''
+    if [ "$platform_name" = Darwin ] &&
+        command -v scutil >/dev/null 2>&1; then
+        dns=$(scutil --dns 2>/dev/null |
+            awk '/nameserver\[[0-9]+\]/ { print $3 }')
+    fi
+    if [ -z "$dns" ] && command -v resolvectl >/dev/null 2>&1; then
+        dns=$(resolvectl dns 2>/dev/null | awk '
+            {
+                sub(/^[^:]*:[[:space:]]*/, "")
+                for (i = 1; i <= NF; i++)
+                    if ($i ~ /^[0-9A-Fa-f:.]+(%[^ ]+)?$/) print $i
+            }
+        ')
+    fi
+    if [ -z "$dns" ] && [ -r /etc/resolv.conf ]; then
+        dns=$(awk '$1 == "nameserver" && NF >= 2 { print $2 }' \
+            /etc/resolv.conf)
+    fi
+    printf '%s\n' "$dns" | awk '
+        NF && !seen[$1]++ {
+            if (out != "") out = out ", "
+            out = out $1
+        }
+        END { if (out != "") print out }
+    '
+}
+
 _profile_begin 'platform'
 server_manufacturer=$(detect_manufacturer)
 server_product_name=$(detect_product_name)

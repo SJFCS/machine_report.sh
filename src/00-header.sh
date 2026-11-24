@@ -39,6 +39,8 @@
 # GPU：REPORT_GPU_ENABLED=0 跳过采集；REPORT_GPU_TIMEOUT 控制 nvidia-smi
 #      发出终止信号的秒数（默认 1，设为 0 表示不限制）。驱动处于不可中断
 #      等待时，信号也可能延迟生效；需要稳定速度时应直接跳过 GPU。
+# SMART：需要 smartmontools 的 smartctl。REPORT_SMART_ENABLED=0 跳过采集；
+#        REPORT_SMART_TIMEOUT 控制单块磁盘超时秒数（默认 2，0 表示不限制）。
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
 #       REPORT_MOCK 作为兼容别名，外部传入 REPORT_MOCK_ENABLED 时优先。
 #
@@ -57,10 +59,11 @@
 #   detect_system_uuid / detect_locale / detect_timezone
 #   detect_login_user / detect_login_client
 #   collect_network_interfaces   输出：IFACE<TAB>IPv4
-#   collect_gpu_rows             输出：NAME<TAB>TOTAL<TAB>USED<TAB>UTIL<TAB>MIN<TAB>MAX
-#   physical_disk_rows           输出：NAME<TAB>SIZE<TAB>MEDIA<TAB>MOUNTS<TAB>PCT<TAB>USED<TAB>AVAIL<TAB>FORMAT
+#   collect_dns_servers          输出：去重后的 DNS 服务器地址
+#   collect_gpu_rows             输出：NAME<TAB>TOTAL<TAB>USED<TAB>UTIL<TAB>MIN<TAB>MAX<TAB>METRICS
+#   physical_disk_rows           输出：NAME<TAB>SIZE<TAB>MEDIA<TAB>MOUNTS<TAB>PCT<TAB>USED<TAB>AVAIL<TAB>FORMAT<TAB>HEALTH<TAB>WEAR<TAB>ERR_LABEL<TAB>ERR
 #   disk_usage_values / collect_disk_mount_map / disk_media_type
-#   disk_mount_details / disk_usage_summary
+#   disk_mount_details / disk_usage_summary / disk_smart_info
 #   用法：value=$(detect_locale)；建议单个 handler 只做一件事并输出纯数据。
 #
 # [FORMAT] 纯值格式化（不画边框）
@@ -133,6 +136,25 @@ if ! [[ $report_gpu_timeout =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 REPORT_GPU_TIMEOUT=$((10#$report_gpu_timeout))
+
+report_smart_setting=${REPORT_SMART_ENABLED:-1}
+case $report_smart_setting in
+    1|true|TRUE|yes|YES|on|ON) REPORT_SMART_ENABLED=1 ;;
+    0|false|FALSE|no|NO|off|OFF) REPORT_SMART_ENABLED=0 ;;
+    *)
+        printf '%s\n' \
+            "REPORT_SMART_ENABLED 只能是 0/1（也支持 true/false/on/off）：$report_smart_setting" >&2
+        exit 2
+        ;;
+esac
+
+report_smart_timeout=${REPORT_SMART_TIMEOUT:-2}
+if ! [[ $report_smart_timeout =~ ^[0-9]+$ ]]; then
+    printf '%s\n' \
+        "REPORT_SMART_TIMEOUT 必须是非负整数秒：$report_smart_timeout" >&2
+    exit 2
+fi
+REPORT_SMART_TIMEOUT=$((10#$report_smart_timeout))
 
 _profile_now_into() {
     local __var=$1 now=${EPOCHREALTIME:-}

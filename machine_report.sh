@@ -38,6 +38,8 @@
 # GPU：REPORT_GPU_ENABLED=0 跳过采集；REPORT_GPU_TIMEOUT 控制 nvidia-smi
 #      发出终止信号的秒数（默认 1，设为 0 表示不限制）。驱动处于不可中断
 #      等待时，信号也可能延迟生效；需要稳定速度时应直接跳过 GPU。
+# SMART：需要 smartmontools 的 smartctl。REPORT_SMART_ENABLED=0 跳过采集；
+#        REPORT_SMART_TIMEOUT 控制单块磁盘超时秒数（默认 2，0 表示不限制）。
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
 #       REPORT_MOCK 作为兼容别名，外部传入 REPORT_MOCK_ENABLED 时优先。
 #
@@ -56,10 +58,11 @@
 #   detect_system_uuid / detect_locale / detect_timezone
 #   detect_login_user / detect_login_client
 #   collect_network_interfaces   输出：IFACE<TAB>IPv4
-#   collect_gpu_rows             输出：NAME<TAB>TOTAL<TAB>USED<TAB>UTIL<TAB>MIN<TAB>MAX
-#   physical_disk_rows           输出：NAME<TAB>SIZE<TAB>MEDIA<TAB>MOUNTS<TAB>PCT<TAB>USED<TAB>AVAIL<TAB>FORMAT
+#   collect_dns_servers          输出：去重后的 DNS 服务器地址
+#   collect_gpu_rows             输出：NAME<TAB>TOTAL<TAB>USED<TAB>UTIL<TAB>MIN<TAB>MAX<TAB>METRICS
+#   physical_disk_rows           输出：NAME<TAB>SIZE<TAB>MEDIA<TAB>MOUNTS<TAB>PCT<TAB>USED<TAB>AVAIL<TAB>FORMAT<TAB>HEALTH<TAB>WEAR<TAB>ERR_LABEL<TAB>ERR
 #   disk_usage_values / collect_disk_mount_map / disk_media_type
-#   disk_mount_details / disk_usage_summary
+#   disk_mount_details / disk_usage_summary / disk_smart_info
 #   用法：value=$(detect_locale)；建议单个 handler 只做一件事并输出纯数据。
 #
 # [FORMAT] 纯值格式化（不画边框）
@@ -132,6 +135,25 @@ if ! [[ $report_gpu_timeout =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 REPORT_GPU_TIMEOUT=$((10#$report_gpu_timeout))
+
+report_smart_setting=${REPORT_SMART_ENABLED:-1}
+case $report_smart_setting in
+    1|true|TRUE|yes|YES|on|ON) REPORT_SMART_ENABLED=1 ;;
+    0|false|FALSE|no|NO|off|OFF) REPORT_SMART_ENABLED=0 ;;
+    *)
+        printf '%s\n' \
+            "REPORT_SMART_ENABLED 只能是 0/1（也支持 true/false/on/off）：$report_smart_setting" >&2
+        exit 2
+        ;;
+esac
+
+report_smart_timeout=${REPORT_SMART_TIMEOUT:-2}
+if ! [[ $report_smart_timeout =~ ^[0-9]+$ ]]; then
+    printf '%s\n' \
+        "REPORT_SMART_TIMEOUT 必须是非负整数秒：$report_smart_timeout" >&2
+    exit 2
+fi
+REPORT_SMART_TIMEOUT=$((10#$report_smart_timeout))
 
 _profile_now_into() {
     local __var=$1 now=${EPOCHREALTIME:-}
@@ -1348,6 +1370,36 @@ collect_network_interfaces() {
     fi
 }
 
+# [HANDLER] collect_dns_servers -> 去重后以逗号分隔的 DNS 服务器地址。
+collect_dns_servers() {
+    local dns=''
+    if [ "$platform_name" = Darwin ] &&
+        command -v scutil >/dev/null 2>&1; then
+        dns=$(scutil --dns 2>/dev/null |
+            awk '/nameserver\[[0-9]+\]/ { print $3 }')
+    fi
+    if [ -z "$dns" ] && command -v resolvectl >/dev/null 2>&1; then
+        dns=$(resolvectl dns 2>/dev/null | awk '
+            {
+                sub(/^[^:]*:[[:space:]]*/, "")
+                for (i = 1; i <= NF; i++)
+                    if ($i ~ /^[0-9A-Fa-f:.]+(%[^ ]+)?$/) print $i
+            }
+        ')
+    fi
+    if [ -z "$dns" ] && [ -r /etc/resolv.conf ]; then
+        dns=$(awk '$1 == "nameserver" && NF >= 2 { print $2 }' \
+            /etc/resolv.conf)
+    fi
+    printf '%s\n' "$dns" | awk '
+        NF && !seen[$1]++ {
+            if (out != "") out = out ", "
+            out = out $1
+        }
+        END { if (out != "") print out }
+    '
+}
+
 _profile_begin 'platform'
 server_manufacturer=$(detect_manufacturer)
 server_product_name=$(detect_product_name)
@@ -1509,12 +1561,94 @@ format_mib_as_gib() {
 # ── [HANDLER / MOCK] GPU ───────────────────────────────────────────────
 
 # [MOCK] demo_gpu_rows -> 两块 A100 的 GPU 演示 TSV。
-# 字段：NAME<TAB>TOTAL_MIB<TAB>USED_MIB<TAB>UTIL%<TAB>MIN_MHZ<TAB>MAX_MHZ。
+# 字段：NAME<TAB>TOTAL_MIB<TAB>USED_MIB<TAB>UTIL%<TAB>MIN_MHZ<TAB>MAX_MHZ<TAB>METRICS。
 # 用法：demo_gpu_rows
 demo_gpu_rows() {
     printf '%s\n' \
-        $'NVIDIA A100-SXM4-80GB\t81920\t64000\t91\t1095\t1410' \
-        $'NVIDIA A100-SXM4-80GB\t81920\t20480\t27\t1095\t1410'
+        $'NVIDIA A100-SXM4-80GB\t81920\t64000\t91\t1095\t1410\t1' \
+        $'NVIDIA A100-SXM4-80GB\t81920\t20480\t27\t1095\t1410\t1'
+}
+
+# [HANDLER] collect_macos_gpu_rows -> Apple/Intel Mac GPU TSV。
+# Apple Silicon 的显存是统一内存，TOTAL 使用物理内存，USED 使用
+# ioreg 的 In use system memory；无实时统计时只输出机型与 GPU 核心数。
+collect_macos_gpu_rows() {
+    local raw='' model='' cores='' util='' used_bytes='' vram_text=''
+    local total_bytes='' total_mib=0 used_mib=0 metrics=0 name=''
+    local vram_value vram_unit
+
+    raw=$(ioreg -r -c AGXAccelerator -d 1 2>/dev/null)
+    if [ -n "$raw" ]; then
+        model=$(printf '%s\n' "$raw" | sed -n \
+            's/.*"model"[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' |
+            head -n 1)
+        cores=$(printf '%s\n' "$raw" | sed -n \
+            's/.*"gpu-core-count"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
+            head -n 1)
+        util=$(printf '%s\n' "$raw" | sed -n \
+            's/.*"Device Utilization %"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
+            head -n 1)
+        used_bytes=$(printf '%s\n' "$raw" | sed -n \
+            's/.*"In use system memory"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
+            head -n 1)
+    fi
+
+    if [ -z "$model" ]; then
+        raw=$(system_profiler SPDisplaysDataType 2>/dev/null)
+        model=$(printf '%s\n' "$raw" | awk -F': ' '
+            /Chipset Model:/ {
+                value = $2
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                print value
+                exit
+            }
+        ')
+        cores=$(printf '%s\n' "$raw" | awk -F': ' '
+            /Total Number of Cores:/ {
+                value = $2
+                gsub(/[^0-9]/, "", value)
+                print value
+                exit
+            }
+        ')
+        vram_text=$(printf '%s\n' "$raw" | awk -F': ' '
+            /VRAM \(Total\):/ {
+                value = $2
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                print value
+                exit
+            }
+        ')
+    fi
+
+    [ -n "$model" ] || return 0
+    if [ -n "$vram_text" ]; then
+        vram_value=${vram_text%% *}
+        vram_unit=${vram_text#* }
+        if [[ $vram_value =~ ^[0-9]+$ ]]; then
+            case $vram_unit in
+                GB) total_mib=$((vram_value * 1024)) ;;
+                MB) total_mib=$vram_value ;;
+            esac
+        fi
+    elif [[ $model == Apple* ]]; then
+        total_bytes=$(sysctl -n hw.memsize 2>/dev/null)
+        if [[ $total_bytes =~ ^[0-9]+$ ]]; then
+            total_mib=$((total_bytes / 1048576))
+        fi
+    fi
+
+    if [ -n "$used_bytes" ] && [ -n "$util" ] && (( total_mib > 0 )); then
+        used_mib=$((used_bytes / 1048576))
+        metrics=1
+    else
+        util=0
+    fi
+
+    name=$model
+    [ -n "$cores" ] && name="$name · ${cores} GPU cores"
+    printf '%s\t%s\t%s\t%s\t0\t0\t%s\n' \
+        "$name" "$total_mib" "$used_mib" "$util" "$metrics"
 }
 
 # [HANDLER] collect_gpu_rows -> 输出 GPU 原始 TSV（字段契约同上）。
@@ -1553,10 +1687,17 @@ collect_gpu_rows() {
                     util = $4 + 0
                     max_mhz = $5 + 0
                     if (total > 0)
-                        printf "%s\t%d\t%d\t%d\t0\t%d\n",
+                        printf "%s\t%d\t%d\t%d\t0\t%d\t1\n",
                             name, total, used, util, max_mhz
                 }
             '
+            return
+        fi
+    fi
+    if [ "$platform_name" = Darwin ]; then
+        raw=$(collect_macos_gpu_rows)
+        if [ -n "$raw" ]; then
+            printf '%s\n' "$raw"
             return
         fi
     fi
@@ -1615,15 +1756,117 @@ disk_usage_values() {
 }
 
 # [MOCK] demo_disk_rows -> 三块物理盘的演示 TSV。
-# 字段：NAME SIZE MEDIA MOUNTS PCT USED AVAIL FORMAT。
+# 字段：NAME SIZE MEDIA MOUNTS PCT USED AVAIL FORMAT HEALTH WEAR ERR_LABEL ERR。
 # 用法：demo_disk_rows
 demo_disk_rows() {
     # 没有 lsblk 的平台（例如当前 macOS 示例环境）使用固定数据，
     # 以保证表格布局可复现；这组值不是任何真实磁盘的容量。
     printf '%s\n' \
-        $'sda\t100G\tSSD\t/\t42.5\t42.5G\t57.5G\text4' \
-        $'nvme0n1\t1.8T\tSSD\t/data,/srv\t67.3\t1.2T\t588G\txfs' \
-        $'sdb\t4T\tHDD\t/backup\t81.2\t3.2T\t752G\txfs'
+        $'sda\t100G\tSSD\t/\t42.5\t42.5G\t57.5G\text4\tPASSED\t4\tCRC\t0' \
+        $'nvme0n1\t1.8T\tSSD\t/data,/srv\t67.3\t1.2T\t588G\txfs\tPASSED\t2\tINTEG\t0' \
+        $'sdb\t4T\tHDD\t/backup\t81.2\t3.2T\t752G\txfs\tPASSED\t62\tCRC\t8'
+}
+
+# [HANDLER] disk_smart_info DEVICE -> HEALTH<TAB>WEAR_PERCENT<TAB>ERR_LABEL<TAB>ERR。
+# NVMe 使用 Percentage Used；SATA 使用剩余寿命属性换算磨损百分比；
+# SATA/SAS 的 CRC 读取 UDMA_CRC_Error_Count 等属性的 RAW_VALUE；
+# NVMe 的 CRC 等价项为 Media and Data Integrity Errors，展示时简写为 INTEG。
+disk_smart_info() {
+    local device=${1-} raw='' health='' wear=''
+    local err_label='INTEG' err_count=''
+
+    case $device in
+        /dev/*) ;;
+        *)
+            printf 'N/A\t-\tINTEG\t-\n'
+            return 0
+            ;;
+    esac
+    if (( REPORT_SMART_ENABLED == 0 )) ||
+        ! command -v smartctl >/dev/null 2>&1; then
+        printf 'N/A\t-\tINTEG\t-\n'
+        return 0
+    fi
+
+    if (( REPORT_SMART_TIMEOUT > 0 )) &&
+        command -v timeout >/dev/null 2>&1; then
+        raw=$(LC_ALL=C timeout "${REPORT_SMART_TIMEOUT}s" smartctl \
+            -H -A -n standby "$device" 2>&1) || true
+    elif (( REPORT_SMART_TIMEOUT > 0 )); then
+        raw=$(LC_ALL=C perl -e 'alarm shift; exec @ARGV; exit 127' \
+            "$REPORT_SMART_TIMEOUT" smartctl \
+            -H -A -n standby "$device" 2>&1) || true
+    else
+        raw=$(LC_ALL=C smartctl -H -A -n standby "$device" 2>&1) || true
+    fi
+    [ -n "$raw" ] || {
+        printf 'N/A\t-\tINTEG\t-\n'
+        return 0
+    }
+
+    health=$(printf '%s\n' "$raw" | sed -n \
+        's/^SMART overall-health self-assessment test result:[[:space:]]*//p' |
+        head -n 1)
+    [ -n "$health" ] || health=$(printf '%s\n' "$raw" | sed -n \
+        's/^SMART Health Status:[[:space:]]*//p' | head -n 1)
+    health=$(printf '%s' "$health" | awk '{ print toupper($1) }')
+    health=${health%!}
+
+    wear=$(printf '%s\n' "$raw" | sed -n \
+        's/.*Percentage Used:[[:space:]]*\([0-9][0-9]*\)%.*/\1/p' |
+        head -n 1)
+    if [ -z "$wear" ]; then
+        # SATA 属性的 VALUE 列（$4）是规范化的剩余寿命；WHEN_FAILED 为空
+        # 时列数会变化，但 VALUE 始终位于 FLAG 之后，因此 $4 仍然稳定。
+        wear=$(printf '%s\n' "$raw" | awk '
+            $2 ~ /(Wear|Life)/ && $2 ~ /(Indicator|Left|Remain|Leveling)/ {
+                if ($4 ~ /^[0-9]+$/) {
+                    wear = 100 - $4
+                    if (wear < 0) wear = 0
+                    if (wear > 100) wear = 100
+                    print wear
+                    exit
+                }
+            }
+        ')
+    fi
+    [[ $wear =~ ^[0-9]+$ ]] || wear='-'
+
+    # RAW_VALUE 是最后一个字段；不能依赖固定列号，因为 WHEN_FAILED
+    # 可能为空，且不同 smartctl 版本的列宽和字段数并不完全一致。
+    err_count=$(printf '%s\n' "$raw" | awk '
+        $2 ~ /CRC/ && $2 ~ /(Error|Err)/ && $NF ~ /^[0-9]+$/ {
+            print $NF
+            exit
+        }
+        /[Cc][Rr][Cc].*[Ee]rror/ {
+            for (i = NF; i >= 1; i--) {
+                if ($i ~ /^[0-9]+$/) {
+                    print $i
+                    exit
+                }
+            }
+        }
+    ')
+    if [[ $err_count =~ ^[0-9]+$ ]]; then
+        err_label=CRC
+    else
+        err_count=$(printf '%s\n' "$raw" | awk '
+            /Media and Data Integrity Errors:/ {
+                for (i = NF; i >= 1; i--) {
+                    if ($i ~ /^[0-9]+$/) {
+                        print $i
+                        exit
+                    }
+                }
+            }
+        ')
+        if ! [[ $err_count =~ ^[0-9]+$ ]]; then
+            err_count='-'
+        fi
+    fi
+    printf '%s\t%s\t%s\t%s\n' \
+        "${health:-N/A}" "$wear" "$err_label" "$err_count"
 }
 
 # [HANDLER] collect_disk_mount_map -> DISK<TAB>FSTYPE<TAB>MOUNTPOINT。
@@ -1720,12 +1963,106 @@ disk_usage_summary() {
 }
 
 # [HANDLER] physical_disk_rows -> 每块物理盘一行原始 TSV。
-# 字段：NAME SIZE MEDIA MOUNTS PCT USED AVAIL FORMAT。
+# 字段：NAME SIZE MEDIA MOUNTS PCT USED AVAIL FORMAT HEALTH WEAR ERR_LABEL ERR。
 # 只负责采集和计算，不负责补齐、颜色或边框，因此可单独测试。
 # 用法：while IFS=$'\t' read -r ...; do ...; done < <(physical_disk_rows)
+#
+# [HANDLER] collect_macos_disk_rows -> macOS 本地卷 TSV（字段契约同上）。
+collect_macos_disk_rows() {
+    local device mount name format media total_k avail_k used_k percent size_h
+    local used_h avail_h root_name='' link seen=':' smart_device=''
+    local smart_info='' smart_health='' smart_wear=''
+    local smart_err_label='' smart_err_count=''
+    local last_smart_device='' last_smart_info=''
+
+    while IFS=$'\t' read -r device mount; do
+        case $mount in
+            /) ;;
+            /Volumes/Recovery|/Volumes/com.apple.TimeMachine.localsnapshots)
+                continue
+                ;;
+            /Volumes/*) ;;
+            *) continue ;;
+        esac
+        case $seen in
+            *":$mount:"*) continue ;;
+        esac
+        seen="${seen}${mount}:"
+
+        read -r total_k avail_k < <(
+            LC_ALL=C df -Pk "$mount" 2>/dev/null |
+                awk 'NR == 2 { print $2, $4 }'
+        )
+        [[ $total_k =~ ^[0-9]+$ && $avail_k =~ ^[0-9]+$ ]] || continue
+        (( total_k > 0 )) || continue
+        used_k=$((total_k - avail_k))
+        (( used_k >= 0 )) || used_k=0
+        percent=$(percent_of "$used_k" "$total_k")
+        size_h=$(human_bytes "$((total_k * 1024))")
+        used_h=$(human_bytes "$((used_k * 1024))")
+        avail_h=$(human_bytes "$((avail_k * 1024))")
+
+        if [ "$mount" = / ]; then
+            root_name=''
+            for link in /Volumes/*; do
+                [ -L "$link" ] || continue
+                [ "$(readlink "$link")" = / ] || continue
+                root_name=$(basename "$link")
+                break
+            done
+            name=${root_name:-Macintosh HD}
+            media=SSD
+        else
+            name=${mount#/Volumes/}
+            name=${name//\\040/ }
+            media=EXTERNAL
+        fi
+
+        format=$(mount | awk -v target="$mount" '
+            $3 == target {
+                sub(/^.*\(/, "")
+                sub(/,.*/, "")
+                print
+                exit
+            }
+        ')
+        format=$(printf '%s' "${format:-APFS}" | tr '[:lower:]' '[:upper:]')
+
+        if [[ $device =~ ^/dev/(disk[0-9]+)s ]]; then
+            smart_device="/dev/${BASH_REMATCH[1]}"
+        else
+            smart_device=$device
+        fi
+        if [ "$smart_device" = "$last_smart_device" ]; then
+            smart_info=$last_smart_info
+        else
+            smart_info=$(disk_smart_info "$smart_device")
+            last_smart_device=$smart_device
+            last_smart_info=$smart_info
+        fi
+        IFS=$'\t' read -r smart_health smart_wear \
+            smart_err_label smart_err_count <<<"$smart_info"
+
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$name" "$size_h" "$media" "$mount" "$percent" \
+            "$used_h" "$avail_h" "$format" \
+            "$smart_health" "$smart_wear" "$smart_err_label" "$smart_err_count"
+    done < <(mount | awk '$1 ~ /^\/dev\/disk/ { print $1 "\t" $3 }')
+}
+
 physical_disk_rows() {
     local mount_map line name size rota type media mounts formats
     local usage percent used_h avail_h usage_details mount_details
+    local smart_info smart_health smart_wear smart_err_label smart_err_count
+
+    if [ "$platform_name" = Darwin ]; then
+        if (( REPORT_MOCK_ENABLED == 1 )); then
+            demo_disk_rows
+        else
+            collect_macos_disk_rows
+        fi
+        return
+    fi
 
     if ! command -v lsblk >/dev/null 2>&1; then
         if (( REPORT_MOCK_ENABLED == 1 )); then
@@ -1749,10 +2086,14 @@ physical_disk_rows() {
         IFS=$'\t' read -r mounts formats <<<"$mount_details"
         usage_details=$(disk_usage_summary "$mounts")
         IFS=$'\t' read -r percent used_h avail_h <<<"$usage_details"
+        smart_info=$(disk_smart_info "/dev/$name")
+        IFS=$'\t' read -r smart_health smart_wear \
+            smart_err_label smart_err_count <<<"$smart_info"
 
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$name" "$(human_bytes "$size")" "$media" "$mounts" \
-            "${percent:--}" "${used_h:--}" "${avail_h:--}" "$formats"
+            "${percent:--}" "${used_h:--}" "${avail_h:--}" "$formats" \
+            "$smart_health" "$smart_wear" "$smart_err_label" "$smart_err_count"
     done < <(LC_ALL=C lsblk -dn -b -o NAME,SIZE,ROTA,TYPE,MODEL 2>/dev/null)
 }
 
@@ -1907,8 +2248,10 @@ add_field 'SERVER'      "${server_manufacturer} · ${server_product_name}"
 add_field 'SYSTEM UUID' "$system_uuid"
 add_field 'UPTIME'      "$uptime"
 add_field 'HOSTNAME'    "$hostname"     1
-primary_ip=''
 _profile_begin 'network'
+dns_servers=$(collect_dns_servers)
+add_field 'DNS' "${dns_servers:--}"
+primary_ip=''
 while IFS=$'\t' read -r nic_name nic_ip; do
     [ -n "$nic_name" ] || continue
     [ -n "$primary_ip" ] || primary_ip=$nic_ip
@@ -1943,25 +2286,30 @@ GPU_IDENTITY_LINES=()
 gpu_index=0
 _profile_begin 'gpu'
 while IFS=$'\t' read -r gpu_name gpu_total gpu_used gpu_util \
-    gpu_min_mhz gpu_max_mhz; do
+    gpu_min_mhz gpu_max_mhz gpu_metrics; do
     [ -n "$gpu_name" ] || continue
     gpu_break=0
     [ "$gpu_index" -eq 0 ] && gpu_break=1
-    gpu_total_gib=$(format_mib_as_gib "$gpu_total")
+    gpu_identity=$gpu_name
+    if [[ $gpu_total =~ ^[0-9]+$ ]] && (( gpu_total > 0 )); then
+        gpu_identity="$gpu_identity · $(format_mib_as_gib "$gpu_total") GiB"
+    fi
     gpu_freq=$(format_gpu_frequency "$gpu_min_mhz" "$gpu_max_mhz")
-    gpu_identity="${gpu_name} · ${gpu_total_gib} GiB · ${gpu_freq}"
+    [ "$gpu_freq" = '-' ] || gpu_identity="$gpu_identity · $gpu_freq"
     GPU_IDENTITY_LINES+=("$gpu_identity")
     add_field "GPU $gpu_index" "$gpu_identity" "$gpu_break"
-    add_field "GPU $gpu_index MEM" ''
-    GPU_MEM_ROWS+=("$FIELD_INDEX")
-    add_field "GPU $gpu_index UTIL" ''
-    GPU_UTIL_ROWS+=("$FIELD_INDEX")
-    GPU_RECORDS+=(
-        "$gpu_used"$'\t'"$gpu_total"$'\t'"$gpu_util"
-    )
+    if [ "$gpu_metrics" = 1 ]; then
+        add_field "GPU $gpu_index MEM" ''
+        GPU_MEM_ROWS+=("$FIELD_INDEX")
+        add_field "GPU $gpu_index UTIL" ''
+        GPU_UTIL_ROWS+=("$FIELD_INDEX")
+        GPU_RECORDS+=(
+            "$gpu_used"$'\t'"$gpu_total"$'\t'"$gpu_util"
+        )
+    fi
     gpu_index=$((gpu_index + 1))
 done < <(collect_gpu_rows)
-if [ "${#GPU_RECORDS[@]}" -eq 0 ]; then
+if [ "$gpu_index" -eq 0 ]; then
     add_field 'GPU' '-' 1
 fi
 _profile_end
@@ -1989,9 +2337,14 @@ DISK_DEVICE_ROWS=()
 DISK_SPACE_ROWS=()
 DISK_MOUNTS=()
 DISK_PCTS=()
+DISK_HEALTH=()
+DISK_WEAR=()
+DISK_ERR_LABELS=()
+DISK_ERR_COUNTS=()
 _profile_begin 'disk collect'
 while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
-    disk_pct disk_used disk_avail disk_format; do
+    disk_pct disk_used disk_avail disk_format disk_health disk_wear \
+    disk_err_label disk_err_count; do
     [ -n "$disk_name" ] || continue
     DISK_DEVICE_ROWS+=(
         "DISK $disk_name"$'\t'"TYPE $disk_media"$'\t'"FORMAT ${disk_format//,/, }"
@@ -2001,6 +2354,10 @@ while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
     )
     DISK_MOUNTS+=("${disk_mounts//,/, }")
     DISK_PCTS+=("$disk_pct")
+    DISK_HEALTH+=("${disk_health:-N/A}")
+    DISK_WEAR+=("${disk_wear:--}")
+    DISK_ERR_LABELS+=("${disk_err_label:-INTEG}")
+    DISK_ERR_COUNTS+=("${disk_err_count:--}")
 done < <(physical_disk_rows)
 _profile_end
 
@@ -2043,6 +2400,16 @@ if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
             add_field 'DISK USAGE' '-'
         fi
         add_field 'MOUNTS' "${DISK_MOUNTS[i]}"
+        smart_wear=${DISK_WEAR[i]:--}
+        case $smart_wear in
+            ''|-) smart_wear='-' ;;
+            *[!0-9]*) ;;
+            *) smart_wear="${smart_wear}%" ;;
+        esac
+        smart_err_label=${DISK_ERR_LABELS[i]:-INTEG}
+        smart_err_count=${DISK_ERR_COUNTS[i]:--}
+        add_field 'SMART' "$(color_kv_segments \
+            "HEALTH ${DISK_HEALTH[i]:-N/A} · WEAR $smart_wear · $smart_err_label $smart_err_count")"
     done
 else
     add_field 'DEVICE' \
@@ -2050,6 +2417,8 @@ else
     add_field 'SPACE' \
         "$(color_kv_segments 'TOTAL - · USED - · AVAIL -')"
     add_field 'MOUNTS' '-'
+    add_field 'SMART' \
+        "$(color_kv_segments 'HEALTH N/A · WEAR - · INTEG -')"
 fi
 _profile_end
 

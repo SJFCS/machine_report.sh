@@ -13,8 +13,10 @@ add_field 'SERVER'      "${server_manufacturer} · ${server_product_name}"
 add_field 'SYSTEM UUID' "$system_uuid"
 add_field 'UPTIME'      "$uptime"
 add_field 'HOSTNAME'    "$hostname"     1
-primary_ip=''
 _profile_begin 'network'
+dns_servers=$(collect_dns_servers)
+add_field 'DNS' "${dns_servers:--}"
+primary_ip=''
 while IFS=$'\t' read -r nic_name nic_ip; do
     [ -n "$nic_name" ] || continue
     [ -n "$primary_ip" ] || primary_ip=$nic_ip
@@ -49,25 +51,30 @@ GPU_IDENTITY_LINES=()
 gpu_index=0
 _profile_begin 'gpu'
 while IFS=$'\t' read -r gpu_name gpu_total gpu_used gpu_util \
-    gpu_min_mhz gpu_max_mhz; do
+    gpu_min_mhz gpu_max_mhz gpu_metrics; do
     [ -n "$gpu_name" ] || continue
     gpu_break=0
     [ "$gpu_index" -eq 0 ] && gpu_break=1
-    gpu_total_gib=$(format_mib_as_gib "$gpu_total")
+    gpu_identity=$gpu_name
+    if [[ $gpu_total =~ ^[0-9]+$ ]] && (( gpu_total > 0 )); then
+        gpu_identity="$gpu_identity · $(format_mib_as_gib "$gpu_total") GiB"
+    fi
     gpu_freq=$(format_gpu_frequency "$gpu_min_mhz" "$gpu_max_mhz")
-    gpu_identity="${gpu_name} · ${gpu_total_gib} GiB · ${gpu_freq}"
+    [ "$gpu_freq" = '-' ] || gpu_identity="$gpu_identity · $gpu_freq"
     GPU_IDENTITY_LINES+=("$gpu_identity")
     add_field "GPU $gpu_index" "$gpu_identity" "$gpu_break"
-    add_field "GPU $gpu_index MEM" ''
-    GPU_MEM_ROWS+=("$FIELD_INDEX")
-    add_field "GPU $gpu_index UTIL" ''
-    GPU_UTIL_ROWS+=("$FIELD_INDEX")
-    GPU_RECORDS+=(
-        "$gpu_used"$'\t'"$gpu_total"$'\t'"$gpu_util"
-    )
+    if [ "$gpu_metrics" = 1 ]; then
+        add_field "GPU $gpu_index MEM" ''
+        GPU_MEM_ROWS+=("$FIELD_INDEX")
+        add_field "GPU $gpu_index UTIL" ''
+        GPU_UTIL_ROWS+=("$FIELD_INDEX")
+        GPU_RECORDS+=(
+            "$gpu_used"$'\t'"$gpu_total"$'\t'"$gpu_util"
+        )
+    fi
     gpu_index=$((gpu_index + 1))
 done < <(collect_gpu_rows)
-if [ "${#GPU_RECORDS[@]}" -eq 0 ]; then
+if [ "$gpu_index" -eq 0 ]; then
     add_field 'GPU' '-' 1
 fi
 _profile_end
@@ -95,9 +102,14 @@ DISK_DEVICE_ROWS=()
 DISK_SPACE_ROWS=()
 DISK_MOUNTS=()
 DISK_PCTS=()
+DISK_HEALTH=()
+DISK_WEAR=()
+DISK_ERR_LABELS=()
+DISK_ERR_COUNTS=()
 _profile_begin 'disk collect'
 while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
-    disk_pct disk_used disk_avail disk_format; do
+    disk_pct disk_used disk_avail disk_format disk_health disk_wear \
+    disk_err_label disk_err_count; do
     [ -n "$disk_name" ] || continue
     DISK_DEVICE_ROWS+=(
         "DISK $disk_name"$'\t'"TYPE $disk_media"$'\t'"FORMAT ${disk_format//,/, }"
@@ -107,6 +119,10 @@ while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
     )
     DISK_MOUNTS+=("${disk_mounts//,/, }")
     DISK_PCTS+=("$disk_pct")
+    DISK_HEALTH+=("${disk_health:-N/A}")
+    DISK_WEAR+=("${disk_wear:--}")
+    DISK_ERR_LABELS+=("${disk_err_label:-INTEG}")
+    DISK_ERR_COUNTS+=("${disk_err_count:--}")
 done < <(physical_disk_rows)
 _profile_end
 
@@ -149,6 +165,16 @@ if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
             add_field 'DISK USAGE' '-'
         fi
         add_field 'MOUNTS' "${DISK_MOUNTS[i]}"
+        smart_wear=${DISK_WEAR[i]:--}
+        case $smart_wear in
+            ''|-) smart_wear='-' ;;
+            *[!0-9]*) ;;
+            *) smart_wear="${smart_wear}%" ;;
+        esac
+        smart_err_label=${DISK_ERR_LABELS[i]:-INTEG}
+        smart_err_count=${DISK_ERR_COUNTS[i]:--}
+        add_field 'SMART' "$(color_kv_segments \
+            "HEALTH ${DISK_HEALTH[i]:-N/A} · WEAR $smart_wear · $smart_err_label $smart_err_count")"
     done
 else
     add_field 'DEVICE' \
@@ -156,6 +182,8 @@ else
     add_field 'SPACE' \
         "$(color_kv_segments 'TOTAL - · USED - · AVAIL -')"
     add_field 'MOUNTS' '-'
+    add_field 'SMART' \
+        "$(color_kv_segments 'HEALTH N/A · WEAR - · INTEG -')"
 fi
 _profile_end
 
