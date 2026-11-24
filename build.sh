@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+SRC_DIR="$ROOT_DIR/src"
+OUTPUT=${1:-"$ROOT_DIR/report.sh"}
+OUTPUT_DIR=$(dirname -- "$OUTPUT")
+
+shopt -s nullglob
+sources=("$SRC_DIR"/*.sh)
+
+if (( ${#sources[@]} == 0 )); then
+    printf 'No source files found in %s\n' "$SRC_DIR" >&2
+    exit 1
+fi
+
+mkdir -p -- "$OUTPUT_DIR"
+tmp=$(mktemp "$OUTPUT_DIR/.report-build.XXXXXX")
+trap 'rm -f -- "$tmp"' EXIT HUP INT TERM
+
+# 片段级 disable 只服务于编辑器的单文件检查；合并产物必须保留完整检查，
+# 否则 report.sh 里的真实未使用变量和未定义变量也会被静音。
+grep -h -v -E '^# shellcheck disable=SC(2034|2154)(,SC(2034|2154))?$' \
+    "${sources[@]}" >"$tmp"
+bash -n "$tmp"
+chmod 755 "$tmp"
+mv -f -- "$tmp" "$OUTPUT"
+
+trap - EXIT HUP INT TERM
+printf 'Built %s from %d source files\n' "$OUTPUT" "${#sources[@]}"
