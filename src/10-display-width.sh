@@ -358,18 +358,26 @@ _truncate_bash_into() {
 # [TABLE] display_width TEXT -> 输出终端显示列数。
 # 纯 ASCII 和已确认的单列 Unicode 不启动进程；复杂文本交给 Perl。
 # 用法：columns=$(display_width "$cell")
+_display_width_into() {
+    local __var=$1 __width_text=${2-} __simple_width
+    if _is_ascii_text "$__width_text"; then
+        printf -v "$__var" '%s' "${#__width_text}"
+        return
+    fi
+    if _simple_display_width_into __simple_width "$__width_text"; then
+        printf -v "$__var" '%s' "$__simple_width"
+        return
+    fi
+    printf -v "$__var" '%s' "$(
+        printf '%s' "$__width_text" |
+            TABLE_MODE=width perl -CS -e "$DISPLAY_WIDTH_PERL"
+    )"
+}
+
 display_width() {
-    local text=${1-} simple_width
-    if _is_ascii_text "$text"; then
-        printf '%s' "${#text}"
-        return
-    fi
-    if _simple_display_width_into simple_width "$text"; then
-        printf '%s' "$simple_width"
-        return
-    fi
-    printf '%s' "$text" |
-        TABLE_MODE=width perl -CS -e "$DISPLAY_WIDTH_PERL"
+    local out
+    _display_width_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [TABLE] _fit_display_into VAR TEXT MAX -> 截断后写入指定变量。
@@ -399,11 +407,19 @@ fit_display() {
 # [TABLE] repeat_char CHAR COUNT -> 重复单列字符，用于边框和条形图。
 # 只接受单列字符；不要把中文或 ANSI 字符串传进来。
 # 用法：line=$(repeat_char '─' 20)
+_repeat_char_into() {
+    local __var=$1 char=$2 count=$3 __fill=''
+    if (( count > 0 )); then
+        printf -v __fill '%*s' "$count" ''
+        __fill=${__fill// /$char}
+    fi
+    printf -v "$__var" '%s' "$__fill"
+}
+
 repeat_char() {
-    local char=$1 count=$2 out
-    (( count > 0 )) || return 0
-    printf -v out '%*s' "$count" ''
-    printf '%s' "${out// /$char}"
+    local out
+    _repeat_char_into out "$1" "$2"
+    printf '%s' "$out"
 }
 
 # [TABLE] _pad_display_into VAR TEXT WIDTH [CURRENT_WIDTH]

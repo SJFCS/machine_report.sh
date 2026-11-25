@@ -106,6 +106,7 @@ DISK_HEALTH=()
 DISK_WEAR=()
 DISK_ERR_LABELS=()
 DISK_ERR_COUNTS=()
+DISK_CELL_WIDTHS=()
 _profile_begin 'disk collect'
 while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
     disk_pct disk_used disk_avail disk_format disk_health disk_wear \
@@ -128,35 +129,88 @@ _profile_end
 
 # [TABLE] format_disk_columns C1 C2 C3 -> 使用 DISK_COL*_W 补齐后拼接。
 # 用法：line=$(format_disk_columns "DISK $name" "TYPE $media" "FORMAT $fmt")
+_format_disk_columns_into() {
+    local __var=$1 c1=$2 c2=$3 c3=$4
+    local w1=${5-} w2=${6-} w3=${7-}
+    local p1 p2 p3
+    _pad_display_into p1 "$c1" "$DISK_COL1_W" ${w1:+"$w1"}
+    _pad_display_into p2 "$c2" "$DISK_COL2_W" ${w2:+"$w2"}
+    _pad_display_into p3 "$c3" "$DISK_COL3_W" ${w3:+"$w3"}
+    printf -v "$__var" '%s · %s · %s' "$p1" "$p2" "$p3"
+}
+
 format_disk_columns() {
-    printf '%s · %s · %s' \
-        "$(pad_display "$1" "$DISK_COL1_W")" \
-        "$(pad_display "$2" "$DISK_COL2_W")" \
-        "$(pad_display "$3" "$DISK_COL3_W")"
+    local line
+    _format_disk_columns_into line "$@"
+    printf '%s' "$line"
 }
 
 # 三列宽度由 DEVICE 和 SPACE 两类记录共同决定，保证上下两行用同一组
 # 分隔符位置。记录内部使用 TAB，因此挂载点或型号中的空格不会干扰分列。
+# 一次批量测量所有单元格，行循环里直接复用宽度，避免每个单元格起 Perl。
+measure_disk_cell_widths() {
+    local i width
+    local -a cells=()
+    local -a all_cells=()
+
+    DISK_CELL_WIDTHS=()
+    for i in "${!DISK_DEVICE_ROWS[@]}"; do
+        IFS=$'\t' read -r -a cells <<<"${DISK_DEVICE_ROWS[i]}"
+        all_cells+=("${cells[@]}")
+        IFS=$'\t' read -r -a cells <<<"${DISK_SPACE_ROWS[i]}"
+        all_cells+=("${cells[@]}")
+    done
+    while IFS= read -r -d '' width; do
+        DISK_CELL_WIDTHS+=("$width")
+    done < <(_display_widths_batch "${all_cells[@]}")
+
+    DISK_COL1_W=0
+    DISK_COL2_W=0
+    DISK_COL3_W=0
+    for ((i = 0; i + 5 < ${#DISK_CELL_WIDTHS[@]}; i += 6)); do
+        width=${DISK_CELL_WIDTHS[i]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL1_W )); then DISK_COL1_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 1]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL2_W )); then DISK_COL2_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 2]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL3_W )); then DISK_COL3_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 3]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL1_W )); then DISK_COL1_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 4]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL2_W )); then DISK_COL2_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 5]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL3_W )); then DISK_COL3_W=$width; fi
+    done
+}
+
 _profile_begin 'disk layout'
 if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
-    DISK_COL1_W=$(max_tsv_column_width 0 \
-        "${DISK_DEVICE_ROWS[@]}" "${DISK_SPACE_ROWS[@]}")
-    DISK_COL2_W=$(max_tsv_column_width 1 \
-        "${DISK_DEVICE_ROWS[@]}" "${DISK_SPACE_ROWS[@]}")
-    DISK_COL3_W=$(max_tsv_column_width 2 \
-        "${DISK_DEVICE_ROWS[@]}" "${DISK_SPACE_ROWS[@]}")
+    measure_disk_cell_widths
 
     for i in "${!DISK_DEVICE_ROWS[@]}"; do
         IFS=$'\t' read -r dev_a dev_b dev_c <<<"${DISK_DEVICE_ROWS[i]}"
         IFS=$'\t' read -r sp_a sp_b sp_c <<<"${DISK_SPACE_ROWS[i]}"
-        dev_line=$(format_disk_columns "$dev_a" "$dev_b" "$dev_c")
-        space_line=$(format_disk_columns "$sp_a" "$sp_b" "$sp_c")
+        base=$((i * 6))
+        _format_disk_columns_into dev_line "$dev_a" "$dev_b" "$dev_c" \
+            "${DISK_CELL_WIDTHS[base]}" \
+            "${DISK_CELL_WIDTHS[base + 1]}" \
+            "${DISK_CELL_WIDTHS[base + 2]}"
+        _format_disk_columns_into space_line "$sp_a" "$sp_b" "$sp_c" \
+            "${DISK_CELL_WIDTHS[base + 3]}" \
+            "${DISK_CELL_WIDTHS[base + 4]}" \
+            "${DISK_CELL_WIDTHS[base + 5]}"
         disk_break=1
         [ "$i" -gt 0 ] && disk_break=2
-        add_field 'DEVICE' \
-            "$(color_kv_segments "$dev_line")" "$disk_break"
-        add_field 'SPACE' \
-            "$(color_kv_segments "$space_line")"
+        _color_kv_segments_into colored_dev "$dev_line"
+        add_field 'DEVICE' "$colored_dev" "$disk_break"
+        _color_kv_segments_into colored_space "$space_line"
+        add_field 'SPACE' "$colored_space"
         if is_number "${DISK_PCTS[i]}"; then
             add_field 'DISK USAGE' ''
             DISK_BAR_ROWS+=("$FIELD_INDEX")
@@ -173,17 +227,20 @@ if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
         esac
         smart_err_label=${DISK_ERR_LABELS[i]:-INTEG}
         smart_err_count=${DISK_ERR_COUNTS[i]:--}
-        add_field 'SMART' "$(color_kv_segments \
-            "HEALTH ${DISK_HEALTH[i]:-N/A} · WEAR $smart_wear · $smart_err_label $smart_err_count")"
+        printf -v smart_line 'HEALTH %s · WEAR %s · %s %s' \
+            "${DISK_HEALTH[i]:-N/A}" "$smart_wear" \
+            "$smart_err_label" "$smart_err_count"
+        _color_kv_segments_into colored_smart "$smart_line"
+        add_field 'SMART' "$colored_smart"
     done
 else
-    add_field 'DEVICE' \
-        "$(color_kv_segments 'DISK - · TYPE - · FORMAT -')" 1
-    add_field 'SPACE' \
-        "$(color_kv_segments 'TOTAL - · USED - · AVAIL -')"
+    _color_kv_segments_into colored_empty 'DISK - · TYPE - · FORMAT -'
+    add_field 'DEVICE' "$colored_empty" 1
+    _color_kv_segments_into colored_empty 'TOTAL - · USED - · AVAIL -'
+    add_field 'SPACE' "$colored_empty"
     add_field 'MOUNTS' '-'
-    add_field 'SMART' \
-        "$(color_kv_segments 'HEALTH N/A · WEAR - · INTEG -')"
+    _color_kv_segments_into colored_empty 'HEALTH N/A · WEAR - · INTEG -'
+    add_field 'SMART' "$colored_empty"
 fi
 _profile_end
 

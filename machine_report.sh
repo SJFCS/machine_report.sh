@@ -622,18 +622,26 @@ _truncate_bash_into() {
 # [TABLE] display_width TEXT -> 输出终端显示列数。
 # 纯 ASCII 和已确认的单列 Unicode 不启动进程；复杂文本交给 Perl。
 # 用法：columns=$(display_width "$cell")
+_display_width_into() {
+    local __var=$1 __width_text=${2-} __simple_width
+    if _is_ascii_text "$__width_text"; then
+        printf -v "$__var" '%s' "${#__width_text}"
+        return
+    fi
+    if _simple_display_width_into __simple_width "$__width_text"; then
+        printf -v "$__var" '%s' "$__simple_width"
+        return
+    fi
+    printf -v "$__var" '%s' "$(
+        printf '%s' "$__width_text" |
+            TABLE_MODE=width perl -CS -e "$DISPLAY_WIDTH_PERL"
+    )"
+}
+
 display_width() {
-    local text=${1-} simple_width
-    if _is_ascii_text "$text"; then
-        printf '%s' "${#text}"
-        return
-    fi
-    if _simple_display_width_into simple_width "$text"; then
-        printf '%s' "$simple_width"
-        return
-    fi
-    printf '%s' "$text" |
-        TABLE_MODE=width perl -CS -e "$DISPLAY_WIDTH_PERL"
+    local out
+    _display_width_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [TABLE] _fit_display_into VAR TEXT MAX -> 截断后写入指定变量。
@@ -663,11 +671,19 @@ fit_display() {
 # [TABLE] repeat_char CHAR COUNT -> 重复单列字符，用于边框和条形图。
 # 只接受单列字符；不要把中文或 ANSI 字符串传进来。
 # 用法：line=$(repeat_char '─' 20)
+_repeat_char_into() {
+    local __var=$1 char=$2 count=$3 __fill=''
+    if (( count > 0 )); then
+        printf -v __fill '%*s' "$count" ''
+        __fill=${__fill// /$char}
+    fi
+    printf -v "$__var" '%s' "$__fill"
+}
+
 repeat_char() {
-    local char=$1 count=$2 out
-    (( count > 0 )) || return 0
-    printf -v out '%*s' "$count" ''
-    printf '%s' "${out// /$char}"
+    local out
+    _repeat_char_into out "$1" "$2"
+    printf '%s' "$out"
 }
 
 # [TABLE] _pad_display_into VAR TEXT WIDTH [CURRENT_WIDTH]
@@ -922,12 +938,19 @@ server_arch=$(uname -m 2>/dev/null)
 
 # [HANDLER] detect_os_name -> 本机操作系统展示名称。
 detect_os_name() {
-    local value='' version=''
+    local value='' key val product_name='' product_version=''
     if [ "$platform_name" = Darwin ] &&
         command -v sw_vers >/dev/null 2>&1; then
-        value=$(sw_vers -productName 2>/dev/null)
-        version=$(sw_vers -productVersion 2>/dev/null)
-        printf '%s' "${value:-macOS}${version:+ $version}"
+        # sw_vers 不带参数时一次输出全部字段，避免每取一项起一个进程。
+        while IFS=: read -r key val; do
+            val=${val#"${val%%[![:space:]]*}"}
+            case $key in
+                ProductName) product_name=$val ;;
+                ProductVersion) product_version=$val ;;
+            esac
+        done < <(sw_vers 2>/dev/null)
+        printf '%s' \
+            "${product_name:-macOS}${product_version:+ $product_version}"
         return
     fi
     if [ -r /etc/os-release ]; then
@@ -958,11 +981,16 @@ collect_cpu_scalars() {
     local model='' sockets_text='' cores_text='' min_text='' max_text=''
     local sockets=1 total_cores=1 min_mhz=0 max_mhz=0 frequency='-' i
     local key value cores_per_socket=0
+    local sysctl_raw=''
 
     if [ "$platform_name" = Darwin ]; then
-        model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
+        # 型号和核数合并成一次 sysctl 调用，输出按行对应各个 key。
+        sysctl_raw=$(sysctl -n machdep.cpu.brand_string hw.ncpu 2>/dev/null)
+        model=${sysctl_raw%%$'\n'*}
+        if [[ $sysctl_raw == *$'\n'* ]]; then
+            total_cores=${sysctl_raw#*$'\n'}
+        fi
         [ -n "$model" ] || model=$(sysctl -n hw.model 2>/dev/null)
-        total_cores=$(sysctl -n hw.ncpu 2>/dev/null)
     else
         if command -v lscpu >/dev/null 2>&1; then
             lscpu_output=$(LC_ALL=C lscpu 2>/dev/null)
@@ -1192,9 +1220,25 @@ dmi_field() {
 # [HANDLER] darwin_field KEY -> 读取 ioreg 中的平台字段。
 # 用法：model=$(darwin_field model)
 darwin_field() {
-    local key=$1
-    ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null |
-        awk -F'"' -v key="$key" '$2 == key { print $4; exit }'
+    local raw=${DARWIN_PLATFORM_RAW:-} line value
+    local prefix="\"${1-}\" = "
+    if [ -z "$raw" ]; then
+        raw=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null)
+    fi
+    # 只用内建字符串处理解析，不再为每个字段起一次 awk。
+    while IFS= read -r line; do
+        case $line in
+            *"$prefix"*) ;;
+            *) continue ;;
+        esac
+        value=${line#*"$prefix"}
+        value=${value#<}
+        value=${value%>}
+        value=${value#\"}
+        value=${value%\"}
+        printf '%s\n' "$value"
+        return 0
+    done <<<"$raw"
 }
 
 # [HANDLER] detect_manufacturer -> 输出服务器厂商；未知时为 UNKNOWN。
@@ -1322,11 +1366,21 @@ detect_timezone() {
     printf '%s' "$value"
 }
 
+# [HANDLER] login_who_line -> `who am i` 的本次运行首次输出。
+# 用户和客户端都来自同一行，取一次即可，避免 session 阶段跑两次 who。
+login_who_line() {
+    if [ -z "${LOGIN_WHO_AM_I_LOADED:-}" ]; then
+        LOGIN_WHO_AM_I=$(who am i 2>/dev/null)
+        LOGIN_WHO_AM_I_LOADED=1
+    fi
+    printf '%s' "$LOGIN_WHO_AM_I"
+}
+
 # [HANDLER] detect_login_user -> 当前登录用户，who 为空时回退环境变量。
 # 用法：user=$(detect_login_user)
 detect_login_user() {
-    local user
-    read -r user _ < <(who am i 2>/dev/null) || true
+    local user=''
+    read -r user _ <<<"$(login_who_line)" || true
     [ -n "$user" ] || user=${USER:-$(id -un)}
     printf '%s' "$user"
 }
@@ -1340,7 +1394,7 @@ detect_login_client() {
     elif [ -n "${SSH_CONNECTION:-}" ]; then
         client=${SSH_CONNECTION%% *}
     else
-        line=$(who am i 2>/dev/null | sed -n '1p')
+        line=$(login_who_line)
         if [[ $line == *'('*')'* ]]; then
             client=${line##*\(}
             client=${client%%)*}
@@ -1357,6 +1411,26 @@ detect_login_client() {
 # 用法：while IFS=$'\t' read -r iface ip; do ...; done < <(collect_network_interfaces)
 collect_network_interfaces() {
     local iface state address rest
+
+    # macOS 默认没有 ip；Homebrew 的 iproute2mac 单次约 40 ms，
+    # 而系统自带 ifconfig 通常只要几毫秒。这里优先用 ifconfig，
+    # 并保持与下面 ip 分支相同的接口过滤规则。
+    if [ "$platform_name" = Darwin ] &&
+        command -v ifconfig >/dev/null 2>&1; then
+        LC_ALL=C ifconfig 2>/dev/null | awk '
+            /^[A-Za-z0-9_.-]+:/ {
+                iface = $1
+                sub(/:$/, "", iface)
+            }
+            $1 == "inet" && $2 != "" && $2 != "127.0.0.1" {
+                if (iface ~ /^(lo|docker|virbr|veth|br-|cni|flannel|cali|kube|tun|tap)/)
+                    next
+                print iface "\t" $2
+            }
+        '
+        return
+    fi
+
     if command -v ip >/dev/null 2>&1; then
         while read -r iface state address rest; do
             [ -n "$iface" ] || continue
@@ -1401,6 +1475,11 @@ collect_dns_servers() {
 }
 
 _profile_begin 'platform'
+if [ "$platform_name" = Darwin ]; then
+    # 厂商、型号和 UUID 都会读同一份 IOPlatformExpertDevice；先取一次，
+    # 后续 darwin_field 直接复用，避免每个字段都启动一次 ioreg。
+    DARWIN_PLATFORM_RAW=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null)
+fi
 server_manufacturer=$(detect_manufacturer)
 server_product_name=$(detect_product_name)
 virt_type=$(detect_virtualization)
@@ -1518,26 +1597,40 @@ human_bytes() {
 # [FORMAT] format_percent_text VALUE -> 右侧对齐的百分比，非法值占 6 列。
 # 正常值先占 5 列再追加 %，例如 " 82.5%" 共 6 列；>= 1000% 会自然加宽。
 # 用法：text=$(format_percent_text 82.5)
-format_percent_text() {
-    local value=${1-} text
-    if ! is_number "$value"; then
-        printf '%6s' '-'
+_format_percent_text_into() {
+    local __var=$1 __value=${2-} __pct_text
+    if ! is_number "$__value"; then
+        printf -v "$__var" '%6s' '-'
         return 0
     fi
-    if ! printf -v text '%5.1f%%' "$value" 2>/dev/null; then
-        printf '%6s' '-'
+    if ! printf -v __pct_text '%5.1f%%' "$__value" 2>/dev/null; then
+        printf -v "$__var" '%6s' '-'
         return 0
     fi
-    case $text in
-        *[Nn][Aa][Nn]*|*[Ii][Nn][Ff]*) printf '%6s' '-' ;;
-        *) printf '%s' "$text" ;;
+    case $__pct_text in
+        *[Nn][Aa][Nn]*|*[Ii][Nn][Ff]*) printf -v "$__var" '%6s' '-' ;;
+        *) printf -v "$__var" '%s' "$__pct_text" ;;
     esac
+}
+
+format_percent_text() {
+    local out
+    _format_percent_text_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] format_percent_suffix VALUE -> 带一个前导空格的百分比后缀。
 # 用法：suffix=$(format_percent_suffix 82.5)；宽度=${#suffix}
+_format_percent_suffix_into() {
+    local __var=$1 __suffix_text
+    _format_percent_text_into __suffix_text "${2-}"
+    printf -v "$__var" ' %s' "$__suffix_text"
+}
+
 format_percent_suffix() {
-    printf ' %s' "$(format_percent_text "${1-}")"
+    local out
+    _format_percent_suffix_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] format_mib_as_gib MIB -> 一位小数的 GiB 数值，不带单位。
@@ -1579,18 +1672,29 @@ collect_macos_gpu_rows() {
 
     raw=$(ioreg -r -c AGXAccelerator -d 1 2>/dev/null)
     if [ -n "$raw" ]; then
-        model=$(printf '%s\n' "$raw" | sed -n \
-            's/.*"model"[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' |
-            head -n 1)
-        cores=$(printf '%s\n' "$raw" | sed -n \
-            's/.*"gpu-core-count"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
-            head -n 1)
-        util=$(printf '%s\n' "$raw" | sed -n \
-            's/.*"Device Utilization %"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
-            head -n 1)
-        used_bytes=$(printf '%s\n' "$raw" | sed -n \
-            's/.*"In use system memory"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
-            head -n 1)
+        # 四组字段来自同一份 ioreg 输出，合成一次 awk 解析，
+        # 避免为 model/cores/util/used 各起一条 sed + head 管道。
+        IFS=$'\t' read -r model cores util used_bytes < <(
+            printf '%s\n' "$raw" | awk -F'"' '
+                function field_value(   value) {
+                    value = $4
+                    if (value == "") {
+                        value = $3
+                        sub(/^[^0-9]*/, "", value)
+                        sub(/[^0-9].*$/, "", value)
+                    }
+                    return value
+                }
+                $2 == "model" && model == "" { model = field_value() }
+                $2 == "gpu-core-count" && cores == "" { cores = field_value() }
+                $2 == "Device Utilization %" && util == "" { util = field_value() }
+                $2 == "In use system memory" && used == "" { used = field_value() }
+                END { print model "\t" cores "\t" util "\t" used }
+            '
+        )
+        [[ $cores =~ ^[0-9]+$ ]] || cores=''
+        [[ $util =~ ^[0-9]+$ ]] || util=''
+        [[ $used_bytes =~ ^[0-9]+$ ]] || used_bytes=''
     fi
 
     if [ -z "$model" ]; then
@@ -1804,67 +1908,78 @@ disk_smart_info() {
         return 0
     }
 
-    health=$(printf '%s\n' "$raw" | sed -n \
-        's/^SMART overall-health self-assessment test result:[[:space:]]*//p' |
-        head -n 1)
-    [ -n "$health" ] || health=$(printf '%s\n' "$raw" | sed -n \
-        's/^SMART Health Status:[[:space:]]*//p' | head -n 1)
-    health=$(printf '%s' "$health" | awk '{ print toupper($1) }')
-    health=${health%!}
-
-    wear=$(printf '%s\n' "$raw" | sed -n \
-        's/.*Percentage Used:[[:space:]]*\([0-9][0-9]*\)%.*/\1/p' |
-        head -n 1)
-    if [ -z "$wear" ]; then
-        # SATA 属性的 VALUE 列（$4）是规范化的剩余寿命；WHEN_FAILED 为空
-        # 时列数会变化，但 VALUE 始终位于 FLAG 之后，因此 $4 仍然稳定。
-        wear=$(printf '%s\n' "$raw" | awk '
-            $2 ~ /(Wear|Life)/ && $2 ~ /(Indicator|Left|Remain|Leveling)/ {
-                if ($4 ~ /^[0-9]+$/) {
-                    wear = 100 - $4
-                    if (wear < 0) wear = 0
-                    if (wear > 100) wear = 100
-                    print wear
-                    exit
-                }
-            }
-        ')
-    fi
-    [[ $wear =~ ^[0-9]+$ ]] || wear='-'
-
-    # RAW_VALUE 是最后一个字段；不能依赖固定列号，因为 WHEN_FAILED
-    # 可能为空，且不同 smartctl 版本的列宽和字段数并不完全一致。
-    err_count=$(printf '%s\n' "$raw" | awk '
-        $2 ~ /CRC/ && $2 ~ /(Error|Err)/ && $NF ~ /^[0-9]+$/ {
-            print $NF
-            exit
-        }
-        /[Cc][Rr][Cc].*[Ee]rror/ {
-            for (i = NF; i >= 1; i--) {
-                if ($i ~ /^[0-9]+$/) {
-                    print $i
-                    exit
-                }
-            }
-        }
-    ')
-    if [[ $err_count =~ ^[0-9]+$ ]]; then
-        err_label=CRC
-    else
-        err_count=$(printf '%s\n' "$raw" | awk '
-            /Media and Data Integrity Errors:/ {
+    # smartctl 的健康、寿命和错误计数都来自同一份输出。合成一次 awk，
+    # 避免每块盘起多组 sed/head/awk 管道；字段契约保持不变。
+    IFS=$'\t' read -r health wear err_label err_count < <(
+        printf '%s\n' "$raw" | awk '
+            function last_number(   i) {
                 for (i = NF; i >= 1; i--) {
-                    if ($i ~ /^[0-9]+$/) {
-                        print $i
-                        exit
-                    }
+                    if ($i ~ /^[0-9]+$/) return $i
+                }
+                return ""
+            }
+            {
+                line = $0
+                if (health == "" &&
+                    line ~ /^SMART overall-health self-assessment test result:/) {
+                    sub(/^SMART overall-health self-assessment test result:[[:space:]]*/, "", line)
+                    split(line, parts, /[[:space:]]+/)
+                    health = parts[1]
+                }
+                if (health == "" && line ~ /^SMART Health Status:/) {
+                    sub(/^SMART Health Status:[[:space:]]*/, "", line)
+                    split(line, parts, /[[:space:]]+/)
+                    health = parts[1]
+                }
+                if (wear == "" && match(line, /Percentage Used:[[:space:]]*[0-9]+%/)) {
+                    value = substr(line, RSTART, RLENGTH)
+                    sub(/^Percentage Used:[[:space:]]*/, "", value)
+                    sub(/%$/, "", value)
+                    wear = value
+                }
+                if (sata_wear == "" &&
+                    $2 ~ /(Wear|Life)/ &&
+                    $2 ~ /(Indicator|Left|Remain|Leveling)/ &&
+                    $4 ~ /^[0-9]+$/) {
+                    value = 100 - $4
+                    if (value < 0) value = 0
+                    if (value > 100) value = 100
+                    sata_wear = value
+                }
+                if (crc == "" &&
+                    $2 ~ /CRC/ && $2 ~ /(Error|Err)/ &&
+                    $NF ~ /^[0-9]+$/) {
+                    crc = $NF
+                }
+                if (crc == "" && line ~ /[Cc][Rr][Cc].*[Ee]rror/) {
+                    value = last_number()
+                    if (value != "") crc = value
+                }
+                if (integ == "" && line ~ /Media and Data Integrity Errors:/) {
+                    value = last_number()
+                    if (value != "") integ = value
                 }
             }
-        ')
-        if ! [[ $err_count =~ ^[0-9]+$ ]]; then
-            err_count='-'
-        fi
-    fi
+            END {
+                if (health == "") health = "N/A"
+                health = toupper(health)
+                sub(/!$/, "", health)
+                if (wear == "") wear = (sata_wear != "" ? sata_wear : "-")
+                if (crc != "") {
+                    label = "CRC"
+                    count = crc
+                } else {
+                    label = "INTEG"
+                    count = (integ != "" ? integ : "-")
+                }
+                print health "\t" wear "\t" label "\t" count
+            }
+        '
+    )
+    health=${health:-N/A}
+    wear=${wear:--}
+    err_label=${err_label:-INTEG}
+    err_count=${err_count:--}
     printf '%s\t%s\t%s\t%s\n' \
         "${health:-N/A}" "$wear" "$err_label" "$err_count"
 }
@@ -1973,8 +2088,43 @@ collect_macos_disk_rows() {
     local used_h avail_h root_name='' link seen=':' smart_device=''
     local smart_info='' smart_health='' smart_wear=''
     local smart_err_label='' smart_err_count=''
-    local last_smart_device='' last_smart_info=''
+    local mount_output row_index j pid
+    local smart_device_list=':' smart_tmpdir=''
+    local total_k='' avail_k=''
+    local -a row_devices=()
+    local -a row_mounts=()
+    local -a smart_devices=()
+    local -a smart_pids=()
+    local -a format_mounts=()
+    local -a format_values=()
+    local -a df_mounts=()
+    local -a df_totals=()
+    local -a df_avails=()
 
+    mount_output=$(mount 2>/dev/null)
+
+    # 一次 df 取回所有挂载点的容量，行循环里按挂载点查表；
+    # 卷多时省掉每个卷一次 df 进程。挂载点可能在空格处被切开，
+    # 因此用正则匹配前五列，剩余整段才是挂载点。
+    while IFS=$'\t' read -r mount total_k avail_k; do
+        [ -n "$mount" ] || continue
+        df_mounts+=("$mount")
+        df_totals+=("$total_k")
+        df_avails+=("$avail_k")
+    done < <(LC_ALL=C df -Pk 2>/dev/null | awk '
+        NR == 1 { next }
+        {
+            line = $0
+            if (!match(line,
+                /^[^ \t]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+%[ \t]+/))
+                next
+            mount = substr(line, RLENGTH + 1)
+            split(substr(line, 1, RLENGTH), parts, /[ \t]+/)
+            print mount "\t" parts[2] "\t" parts[4]
+        }
+    ')
+
+    # 先筛选要展示的卷，保持原有顺序和去重规则。
     while IFS=$'\t' read -r device mount; do
         case $mount in
             /) ;;
@@ -1988,11 +2138,86 @@ collect_macos_disk_rows() {
             *":$mount:"*) continue ;;
         esac
         seen="${seen}${mount}:"
+        row_devices+=("$device")
+        row_mounts+=("$mount")
+    done < <(printf '%s\n' "$mount_output" |
+        awk '$1 ~ /^\/dev\/disk/ { print $1 "\t" $3 }')
 
-        read -r total_k avail_k < <(
-            LC_ALL=C df -Pk "$mount" 2>/dev/null |
-                awk 'NR == 2 { print $2, $4 }'
-        )
+    if (( ${#row_devices[@]} == 0 )); then
+        return 0
+    fi
+
+    # 不同卷可能映射到同一块物理盘；每块盘只查询一次 SMART。
+    for device in "${row_devices[@]}"; do
+        if [[ $device =~ ^/dev/(disk[0-9]+)s ]]; then
+            smart_device="/dev/${BASH_REMATCH[1]}"
+        else
+            smart_device=$device
+        fi
+        case $smart_device_list in
+            *":$smart_device:"*) ;;
+            *)
+                smart_devices+=("$smart_device")
+                smart_device_list="${smart_device_list}${smart_device}:"
+                ;;
+        esac
+    done
+
+    # smartctl 通常是磁盘阶段最慢的一步。多块盘并行查询，
+    # 墙钟时间由最慢的一块决定，而不是各块盘耗时之和。
+    if (( REPORT_SMART_ENABLED == 1 )) &&
+        (( ${#smart_devices[@]} > 0 )); then
+        smart_tmpdir=$(mktemp -d \
+            "${TMPDIR:-/tmp}/mreport-smart.XXXXXX") || smart_tmpdir=''
+        if [ -n "$smart_tmpdir" ]; then
+            for j in "${!smart_devices[@]}"; do
+                (disk_smart_info "${smart_devices[j]}" \
+                    >"$smart_tmpdir/$j") &
+                smart_pids+=("$!")
+            done
+        fi
+    fi
+
+    # 一次解析所有挂载点的文件系统类型，避免每块盘再起一次 mount|awk|tr。
+    while IFS=$'\t' read -r mount format; do
+        [ -n "$mount" ] || continue
+        format_mounts+=("$mount")
+        format_values+=("$format")
+    done < <(printf '%s\n' "$mount_output" | awk '
+        $1 ~ /^\/dev\/disk/ {
+            value = $0
+            sub(/^.*\(/, "", value)
+            sub(/,.*/, "", value)
+            print $3 "\t" toupper(value)
+        }
+    ')
+
+    if [ -n "$smart_tmpdir" ]; then
+        for pid in "${smart_pids[@]}"; do
+            wait "$pid" || true
+        done
+    fi
+
+    for row_index in "${!row_devices[@]}"; do
+        device=${row_devices[row_index]}
+        mount=${row_mounts[row_index]}
+
+        total_k=''
+        avail_k=''
+        for j in "${!df_mounts[@]}"; do
+            if [ "${df_mounts[j]}" = "$mount" ]; then
+                total_k=${df_totals[j]}
+                avail_k=${df_avails[j]}
+                break
+            fi
+        done
+        # 批量结果里没有这个挂载点时再单独查一次，保证行为不变。
+        if ! [[ $total_k =~ ^[0-9]+$ && $avail_k =~ ^[0-9]+$ ]]; then
+            read -r total_k avail_k < <(
+                LC_ALL=C df -Pk "$mount" 2>/dev/null |
+                    awk 'NR == 2 { print $2, $4 }'
+            )
+        fi
         [[ $total_k =~ ^[0-9]+$ && $avail_k =~ ^[0-9]+$ ]] || continue
         (( total_k > 0 )) || continue
         used_k=$((total_k - avail_k))
@@ -2018,27 +2243,32 @@ collect_macos_disk_rows() {
             media=EXTERNAL
         fi
 
-        format=$(mount | awk -v target="$mount" '
-            $3 == target {
-                sub(/^.*\(/, "")
-                sub(/,.*/, "")
-                print
-                exit
-            }
-        ')
-        format=$(printf '%s' "${format:-APFS}" | tr '[:lower:]' '[:upper:]')
+        format=''
+        if (( ${#format_mounts[@]} > 0 )); then
+            for j in "${!format_mounts[@]}"; do
+                if [ "${format_mounts[j]}" = "$mount" ]; then
+                    format=${format_values[j]}
+                    break
+                fi
+            done
+        fi
+        format=${format:-APFS}
 
         if [[ $device =~ ^/dev/(disk[0-9]+)s ]]; then
             smart_device="/dev/${BASH_REMATCH[1]}"
         else
             smart_device=$device
         fi
-        if [ "$smart_device" = "$last_smart_device" ]; then
-            smart_info=$last_smart_info
+        if [ -n "$smart_tmpdir" ]; then
+            smart_info=''
+            for j in "${!smart_devices[@]}"; do
+                if [ "${smart_devices[j]}" = "$smart_device" ]; then
+                    smart_info=$(cat "$smart_tmpdir/$j")
+                    break
+                fi
+            done
         else
             smart_info=$(disk_smart_info "$smart_device")
-            last_smart_device=$smart_device
-            last_smart_info=$smart_info
         fi
         IFS=$'\t' read -r smart_health smart_wear \
             smart_err_label smart_err_count <<<"$smart_info"
@@ -2047,7 +2277,11 @@ collect_macos_disk_rows() {
             "$name" "$size_h" "$media" "$mount" "$percent" \
             "$used_h" "$avail_h" "$format" \
             "$smart_health" "$smart_wear" "$smart_err_label" "$smart_err_count"
-    done < <(mount | awk '$1 ~ /^\/dev\/disk/ { print $1 "\t" $3 }')
+    done
+
+    if [ -n "$smart_tmpdir" ]; then
+        rm -rf -- "$smart_tmpdir"
+    fi
 }
 
 physical_disk_rows() {
@@ -2097,17 +2331,27 @@ physical_disk_rows() {
     done < <(LC_ALL=C lsblk -dn -b -o NAME,SIZE,ROTA,TYPE,MODEL 2>/dev/null)
 }
 
+
 # shellcheck shell=bash
 #
 # [FORMAT] align_row_ends LEFT RIGHT [WIDTH] -> 两端对齐到一行。
 # 两侧都可以带 ANSI；省略 WIDTH 时使用当前 DATA_W。
 # 用法：line=$(align_row_ends "$left" "$right")
 
-align_row_ends() {
-    local left=$1 right=$2 width=${3:-$DATA_W} gap
-    gap=$((width - $(display_width "$left") - $(display_width "$right")))
+_align_row_ends_into() {
+    local __var=$1 left=$2 right=$3 width=${4:-$DATA_W}
+    local gap left_width right_width
+    _display_width_into left_width "$left"
+    _display_width_into right_width "$right"
+    gap=$((width - left_width - right_width))
     (( gap >= 1 )) || gap=1
-    printf '%s%*s%s' "$left" "$gap" '' "$right"
+    printf -v "$__var" '%s%*s%s' "$left" "$gap" '' "$right"
+}
+
+align_row_ends() {
+    local out
+    _align_row_ends_into out "$@"
+    printf '%s' "$out"
 }
 
 # [FORMAT] format_quantity QTY UNIT COLOR WIDTH -> 左对齐数量 + 固定单位。
@@ -2126,29 +2370,18 @@ format_mem_quantity() {
 
 # [FORMAT] align_mem_percent LABEL PCT COLOR -> 左数量、右百分比的整行值。
 # 用法：row=$(align_mem_percent "$display" 82.5 "$C_BAR_USED")
-align_mem_percent() {
-    local metric=$1 percent=$2 color=$3 percent_text
-    percent_text=$(format_percent_text "$percent")
-    align_row_ends "$metric" "${color}${percent_text}${C_RESET}"
+_align_mem_percent_into() {
+    local __var=$1 metric=$2 percent=$3 color=$4 __mem_pct_text
+    _format_percent_text_into __mem_pct_text "$percent"
+    _align_row_ends_into "$__var" "$metric" \
+        "${color}${__mem_pct_text}${C_RESET}"
 }
 
-mem_used_percent=$(percent_of "$mem_used" "$mem_total")
-mem_free_percent=$(percent_of "$mem_free" "$mem_total")
-mem_shared_percent=$(percent_of "$mem_shared" "$mem_total")
-mem_cache_percent=$(percent_of "$mem_cache" "$mem_total")
-mem_available_percent=$(percent_of "$mem_available" "$mem_total")
-
-# 统一格式化为一位小数，避免 16 和 3.2 的小数点无法纵向对齐。
-printf -v mem_total_qty     '%.1f' "$mem_total"
-printf -v mem_used_qty      '%.1f' "$mem_used"
-printf -v mem_free_qty      '%.1f' "$mem_free"
-printf -v mem_shared_qty    '%.1f' "$mem_shared"
-printf -v mem_cache_qty     '%.1f' "$mem_cache"
-printf -v mem_available_qty '%.1f' "$mem_available"
-
-MEM_QTY_W=$(max_display_width \
-    "$mem_total_qty" "$mem_used_qty" "$mem_free_qty" \
-    "$mem_shared_qty" "$mem_cache_qty" "$mem_available_qty")
+align_mem_percent() {
+    local out
+    _align_mem_percent_into out "$@"
+    printf '%s' "$out"
+}
 
 # “是否正常”看 available，而不是看 used：used 高不代表新进程没有内存
 # 可用，因为 buff/cache 中可以回收一部分。阈值可按业务调整；这里采用
@@ -2175,6 +2408,24 @@ memory_status_text() {
         *)    printf '%s●可用内存危险%s' "$C_CRIT" "$C_RESET" ;;
     esac
 }
+
+mem_used_percent=$(percent_of "$mem_used" "$mem_total")
+mem_free_percent=$(percent_of "$mem_free" "$mem_total")
+mem_shared_percent=$(percent_of "$mem_shared" "$mem_total")
+mem_cache_percent=$(percent_of "$mem_cache" "$mem_total")
+mem_available_percent=$(percent_of "$mem_available" "$mem_total")
+
+# 统一格式化为一位小数，避免 16 和 3.2 的小数点无法纵向对齐。
+printf -v mem_total_qty     '%.1f' "$mem_total"
+printf -v mem_used_qty      '%.1f' "$mem_used"
+printf -v mem_free_qty      '%.1f' "$mem_free"
+printf -v mem_shared_qty    '%.1f' "$mem_shared"
+printf -v mem_cache_qty     '%.1f' "$mem_cache"
+printf -v mem_available_qty '%.1f' "$mem_available"
+
+MEM_QTY_W=$(max_display_width \
+    "$mem_total_qty" "$mem_used_qty" "$mem_free_qty" \
+    "$mem_shared_qty" "$mem_cache_qty" "$mem_available_qty")
 
 mem_status=$(memory_status_text \
     "$mem_available_percent" "$MEM_OK_PERCENT" "$MEM_WARN_PERCENT")
@@ -2207,30 +2458,44 @@ add_field() {
 # [FORMAT] color_kv_segment "KEY VALUE" -> 青色键、黄色值。
 # 没有空格的段落整段按值着色，适合 '-' 等占位符。
 # 用法：colored=$(color_kv_segment 'TYPE SSD')
-color_kv_segment() {
-    local part=$1 key value
+_color_kv_segment_into() {
+    local __var=$1 part=$2 key value
     if [[ "$part" == *" "* ]]; then
         key=${part%% *}
         value=${part#* }
-        printf '%s%s%s %s%s%s' \
+        printf -v "$__var" '%s%s%s %s%s%s' \
             "$C_K" "$key" "$C_RESET" \
             "$C_V" "$value" "$C_RESET"
     else
-        printf '%s%s%s' "$C_V" "$part" "$C_RESET"
+        printf -v "$__var" '%s%s%s' "$C_V" "$part" "$C_RESET"
     fi
+}
+
+color_kv_segment() {
+    local out
+    _color_kv_segment_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] color_kv_segments TEXT -> 统一着色以 " · " 分隔的 KV 段落。
 # 只处理颜色和分隔符，不补齐宽度；应先用 pad_display 对齐各列。
 # 用法：colored=$(color_kv_segments 'DISK sda · TYPE SSD')
-color_kv_segments() {
-    local rest=$1 part out=''
+_color_kv_segments_into() {
+    local __var=$1 rest=${2-} part __kv_part_out __kv_out=''
     while [[ "$rest" == *" · "* ]]; do
         part=${rest%% · *}
-        out+="$(color_kv_segment "$part") · "
+        _color_kv_segment_into __kv_part_out "$part"
+        __kv_out+="${__kv_part_out} · "
         rest=${rest#* · }
     done
-    out+=$(color_kv_segment "$rest")
+    _color_kv_segment_into __kv_part_out "$rest"
+    __kv_out+=$__kv_part_out
+    printf -v "$__var" '%s' "$__kv_out"
+}
+
+color_kv_segments() {
+    local out
+    _color_kv_segments_into out "${1-}"
     printf '%s' "$out"
 }
 
@@ -2341,6 +2606,7 @@ DISK_HEALTH=()
 DISK_WEAR=()
 DISK_ERR_LABELS=()
 DISK_ERR_COUNTS=()
+DISK_CELL_WIDTHS=()
 _profile_begin 'disk collect'
 while IFS=$'\t' read -r disk_name disk_size disk_media disk_mounts \
     disk_pct disk_used disk_avail disk_format disk_health disk_wear \
@@ -2363,35 +2629,88 @@ _profile_end
 
 # [TABLE] format_disk_columns C1 C2 C3 -> 使用 DISK_COL*_W 补齐后拼接。
 # 用法：line=$(format_disk_columns "DISK $name" "TYPE $media" "FORMAT $fmt")
+_format_disk_columns_into() {
+    local __var=$1 c1=$2 c2=$3 c3=$4
+    local w1=${5-} w2=${6-} w3=${7-}
+    local p1 p2 p3
+    _pad_display_into p1 "$c1" "$DISK_COL1_W" ${w1:+"$w1"}
+    _pad_display_into p2 "$c2" "$DISK_COL2_W" ${w2:+"$w2"}
+    _pad_display_into p3 "$c3" "$DISK_COL3_W" ${w3:+"$w3"}
+    printf -v "$__var" '%s · %s · %s' "$p1" "$p2" "$p3"
+}
+
 format_disk_columns() {
-    printf '%s · %s · %s' \
-        "$(pad_display "$1" "$DISK_COL1_W")" \
-        "$(pad_display "$2" "$DISK_COL2_W")" \
-        "$(pad_display "$3" "$DISK_COL3_W")"
+    local line
+    _format_disk_columns_into line "$@"
+    printf '%s' "$line"
 }
 
 # 三列宽度由 DEVICE 和 SPACE 两类记录共同决定，保证上下两行用同一组
 # 分隔符位置。记录内部使用 TAB，因此挂载点或型号中的空格不会干扰分列。
+# 一次批量测量所有单元格，行循环里直接复用宽度，避免每个单元格起 Perl。
+measure_disk_cell_widths() {
+    local i width
+    local -a cells=()
+    local -a all_cells=()
+
+    DISK_CELL_WIDTHS=()
+    for i in "${!DISK_DEVICE_ROWS[@]}"; do
+        IFS=$'\t' read -r -a cells <<<"${DISK_DEVICE_ROWS[i]}"
+        all_cells+=("${cells[@]}")
+        IFS=$'\t' read -r -a cells <<<"${DISK_SPACE_ROWS[i]}"
+        all_cells+=("${cells[@]}")
+    done
+    while IFS= read -r -d '' width; do
+        DISK_CELL_WIDTHS+=("$width")
+    done < <(_display_widths_batch "${all_cells[@]}")
+
+    DISK_COL1_W=0
+    DISK_COL2_W=0
+    DISK_COL3_W=0
+    for ((i = 0; i + 5 < ${#DISK_CELL_WIDTHS[@]}; i += 6)); do
+        width=${DISK_CELL_WIDTHS[i]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL1_W )); then DISK_COL1_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 1]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL2_W )); then DISK_COL2_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 2]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL3_W )); then DISK_COL3_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 3]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL1_W )); then DISK_COL1_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 4]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL2_W )); then DISK_COL2_W=$width; fi
+        width=${DISK_CELL_WIDTHS[i + 5]}
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        if (( width > DISK_COL3_W )); then DISK_COL3_W=$width; fi
+    done
+}
+
 _profile_begin 'disk layout'
 if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
-    DISK_COL1_W=$(max_tsv_column_width 0 \
-        "${DISK_DEVICE_ROWS[@]}" "${DISK_SPACE_ROWS[@]}")
-    DISK_COL2_W=$(max_tsv_column_width 1 \
-        "${DISK_DEVICE_ROWS[@]}" "${DISK_SPACE_ROWS[@]}")
-    DISK_COL3_W=$(max_tsv_column_width 2 \
-        "${DISK_DEVICE_ROWS[@]}" "${DISK_SPACE_ROWS[@]}")
+    measure_disk_cell_widths
 
     for i in "${!DISK_DEVICE_ROWS[@]}"; do
         IFS=$'\t' read -r dev_a dev_b dev_c <<<"${DISK_DEVICE_ROWS[i]}"
         IFS=$'\t' read -r sp_a sp_b sp_c <<<"${DISK_SPACE_ROWS[i]}"
-        dev_line=$(format_disk_columns "$dev_a" "$dev_b" "$dev_c")
-        space_line=$(format_disk_columns "$sp_a" "$sp_b" "$sp_c")
+        base=$((i * 6))
+        _format_disk_columns_into dev_line "$dev_a" "$dev_b" "$dev_c" \
+            "${DISK_CELL_WIDTHS[base]}" \
+            "${DISK_CELL_WIDTHS[base + 1]}" \
+            "${DISK_CELL_WIDTHS[base + 2]}"
+        _format_disk_columns_into space_line "$sp_a" "$sp_b" "$sp_c" \
+            "${DISK_CELL_WIDTHS[base + 3]}" \
+            "${DISK_CELL_WIDTHS[base + 4]}" \
+            "${DISK_CELL_WIDTHS[base + 5]}"
         disk_break=1
         [ "$i" -gt 0 ] && disk_break=2
-        add_field 'DEVICE' \
-            "$(color_kv_segments "$dev_line")" "$disk_break"
-        add_field 'SPACE' \
-            "$(color_kv_segments "$space_line")"
+        _color_kv_segments_into colored_dev "$dev_line"
+        add_field 'DEVICE' "$colored_dev" "$disk_break"
+        _color_kv_segments_into colored_space "$space_line"
+        add_field 'SPACE' "$colored_space"
         if is_number "${DISK_PCTS[i]}"; then
             add_field 'DISK USAGE' ''
             DISK_BAR_ROWS+=("$FIELD_INDEX")
@@ -2408,17 +2727,20 @@ if [ "${#DISK_DEVICE_ROWS[@]}" -gt 0 ]; then
         esac
         smart_err_label=${DISK_ERR_LABELS[i]:-INTEG}
         smart_err_count=${DISK_ERR_COUNTS[i]:--}
-        add_field 'SMART' "$(color_kv_segments \
-            "HEALTH ${DISK_HEALTH[i]:-N/A} · WEAR $smart_wear · $smart_err_label $smart_err_count")"
+        printf -v smart_line 'HEALTH %s · WEAR %s · %s %s' \
+            "${DISK_HEALTH[i]:-N/A}" "$smart_wear" \
+            "$smart_err_label" "$smart_err_count"
+        _color_kv_segments_into colored_smart "$smart_line"
+        add_field 'SMART' "$colored_smart"
     done
 else
-    add_field 'DEVICE' \
-        "$(color_kv_segments 'DISK - · TYPE - · FORMAT -')" 1
-    add_field 'SPACE' \
-        "$(color_kv_segments 'TOTAL - · USED - · AVAIL -')"
+    _color_kv_segments_into colored_empty 'DISK - · TYPE - · FORMAT -'
+    add_field 'DEVICE' "$colored_empty" 1
+    _color_kv_segments_into colored_empty 'TOTAL - · USED - · AVAIL -'
+    add_field 'SPACE' "$colored_empty"
     add_field 'MOUNTS' '-'
-    add_field 'SMART' \
-        "$(color_kv_segments 'HEALTH N/A · WEAR - · INTEG -')"
+    _color_kv_segments_into colored_empty 'HEALTH N/A · WEAR - · INTEG -'
+    add_field 'SMART' "$colored_empty"
 fi
 _profile_end
 
@@ -2525,9 +2847,9 @@ _format_report_lines() {
 # 普通十进制先转成定点整数计算块数；异常输入才回退 awk。
 # 省略 WIDTH 时使用 DATA_W。
 # 用法：graph=$(bar 42.5 100 20)
-bar() {
-    local used=${1-0} total=${2-0} width=${3:-${DATA_W:-0}}
-    local blocks scaled_used scaled_total
+_bar_into() {
+    local __var=$1 used=${2-0} total=${3-0} width=${4:-${DATA_W:-0}}
+    local blocks scaled_used scaled_total filled empty
 
     is_number "$used" || used=0
     is_number "$total" || total=0
@@ -2551,57 +2873,90 @@ bar() {
         }')
     fi
 
-    printf '%s%s' \
-        "$(repeat_char '█' "$blocks")" \
-        "$(repeat_char '░' "$((width - blocks))")"
+    _repeat_char_into filled '█' "$blocks"
+    _repeat_char_into empty '░' "$((width - blocks))"
+    printf -v "$__var" '%s%s' "$filled" "$empty"
+}
+
+bar() {
+    local out
+    _bar_into out "$@"
+    printf '%s' "$out"
 }
 
 # [TABLE] percent_bar_display VALUE TOTAL PERCENT -> 条形图 + 百分比文本。
 # 用法：cell=$(percent_bar_display 42.5 100 42.5)
-percent_bar_display() {
-    local value=$1 total=$2 percent=$3 suffix graph_width
-    suffix=$(format_percent_suffix "$percent")
+_percent_bar_display_into() {
+    local __var=$1 value=$2 total=$3 percent=$4
+    local suffix graph_width graph
+    _format_percent_suffix_into suffix "$percent"
     graph_width=$((DATA_W - ${#suffix}))
     (( graph_width > 0 )) || graph_width=1
-    printf '%s%s' "$(bar "$value" "$total" "$graph_width")" "$suffix"
+    _bar_into graph "$value" "$total" "$graph_width"
+    printf -v "$__var" '%s%s' "$graph" "$suffix"
+}
+
+percent_bar_display() {
+    local out
+    _percent_bar_display_into out "$@"
+    printf '%s' "$out"
 }
 
 # [FORMAT] disk_usage_display PERCENT -> 磁盘使用率条形图值列。
 # 用法：cell=$(disk_usage_display 42.5)
+_disk_usage_display_into() {
+    local __var=$1 percent=${2-}
+    _percent_bar_display_into "$__var" "$percent" 100 "$percent"
+}
+
 disk_usage_display() {
-    local percent=$1
-    percent_bar_display "$percent" 100 "$percent"
+    local out
+    _disk_usage_display_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] gpu_memory_display USED_MIB TOTAL_MIB -> 显存条形图和 GiB 文本。
 # 用法：cell=$(gpu_memory_display 64000 81920)
-gpu_memory_display() {
-    local used_mib=$1 total_mib=$2
-    local percent used_gib total_gib suffix graph_width
+_gpu_memory_display_into() {
+    local __var=$1 used_mib=$2 total_mib=$3
+    local percent used_gib total_gib suffix percent_text
+    local graph_width graph
     percent=$(percent_of "$used_mib" "$total_mib")
     used_gib=$(format_mib_as_gib "$used_mib")
     total_gib=$(format_mib_as_gib "$total_mib")
-    printf -v suffix ' %s/%s GiB %s' \
-        "$used_gib" "$total_gib" "$(format_percent_text "$percent")"
+    _format_percent_text_into percent_text "$percent"
+    suffix=" ${used_gib}/${total_gib} GiB ${percent_text}"
     graph_width=$((DATA_W - ${#suffix}))
     (( graph_width > 0 )) || graph_width=1
-    printf '%s%s' \
-        "$(bar "$used_mib" "$total_mib" "$graph_width")" "$suffix"
+    _bar_into graph "$used_mib" "$total_mib" "$graph_width"
+    printf -v "$__var" '%s%s' "$graph" "$suffix"
+}
+
+gpu_memory_display() {
+    local out
+    _gpu_memory_display_into out "$@"
+    printf '%s' "$out"
 }
 
 # [FORMAT] gpu_util_display PERCENT -> GPU 利用率条形图值列。
 # 用法：cell=$(gpu_util_display 91)
+_gpu_util_display_into() {
+    local __var=$1 percent=${2-}
+    _percent_bar_display_into "$__var" "$percent" 100 "$percent"
+}
+
 gpu_util_display() {
-    local percent=$1
-    percent_bar_display "$percent" 100 "$percent"
+    local out
+    _gpu_util_display_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] load_display LOAD CPU_COUNT -> 负载条、负载/核数和百分比。
 # 用法：cell=$(load_display 25.60 128)
-load_display() {
-    local load=$1 cores=$2
+_load_display_into() {
+    local __var=$1 load=$2 cores=$3
     local percent load_text percent_text suffix
-    local graph_width
+    local graph_width graph
 
     percent=$(percent_of "$load" "$cores")
     if is_number "$load"; then
@@ -2609,13 +2964,20 @@ load_display() {
     else
         load_text='    -'
     fi
-    percent_text=$(format_percent_text "$percent")
+    _format_percent_text_into percent_text "$percent"
     # 先拼出完整的右侧文字，再按实际长度扣减条形宽度，避免每加一个
     # 分隔符就要同步修改一个魔法数字。
     printf -v suffix ' %s/%s %s' "$load_text" "$cores" "$percent_text"
     graph_width=$((DATA_W - ${#suffix}))
     (( graph_width > 0 )) || graph_width=1
-    printf '%s%s' "$(bar "$load" "$cores" "$graph_width")" "$suffix"
+    _bar_into graph "$load" "$cores" "$graph_width"
+    printf -v "$__var" '%s%s' "$graph" "$suffix"
+}
+
+load_display() {
+    local out
+    _load_display_into out "$@"
+    printf '%s' "$out"
 }
 
 # [TABLE] stacked_bar TOTAL WIDTH VALUE CHAR COLOR ... -> 彩色分段堆叠条。
@@ -2634,9 +2996,9 @@ load_display() {
 #
 # 字符用 █ / ▓ / ░ 区分，即使 NO_COLOR=1 或输出到日志文件，也能看出
 # 三段结构；终端里则由颜色进一步区分 used、buff/cache 和 free。
-stacked_bar() {
-    local total=${1-0} width=${2-0}
-    shift 2
+_stacked_bar_into() {
+    local __var=$1 total=${2-0} width=${3-0}
+    shift 3
 
     is_number "$total" || total=0
     [[ $width =~ ^[0-9]+$ ]] || width=0
@@ -2657,6 +3019,7 @@ stacked_bar() {
     done
 
     if (( ${#values[@]} == 0 || width <= 0 )); then
+        printf -v "$__var" '%s' ''
         return 0
     fi
 
@@ -2715,25 +3078,33 @@ stacked_bar() {
             '
     )
 
-    local i blocks_used=0
+    local i blocks_used=0 __bar_out='' __segment
     for i in "${!values[@]}"; do
         count=${counts[i]:-0}
         if (( count > 0 )); then
-            printf '%s%s%s' \
-                "${colors[i]}" \
-                "$(repeat_char "${chars[i]}" "$count")" \
-                "$C_RESET"
+            _repeat_char_into __segment "${chars[i]}" "$count"
+            __bar_out+="${colors[i]}${__segment}${C_RESET}"
             blocks_used=$((blocks_used + count))
         fi
     done
 
     # total 大于各段之和时，剩余部分用中性背景补齐，仍保持 WIDTH 列。
     if (( blocks_used < width )); then
-        printf '%s%s%s' \
-            "$C_BAR_EMPTY" \
-            "$(repeat_char '░' "$((width - blocks_used))")" \
-            "$C_RESET"
+        _repeat_char_into __segment '░' "$((width - blocks_used))"
+        __bar_out+="${C_BAR_EMPTY}${__segment}${C_RESET}"
     fi
+
+    printf -v "$__var" '%s' "$__bar_out"
+}
+
+stacked_bar() {
+    local out rc
+    _stacked_bar_into out "$@"
+    rc=$?
+    if (( rc == 0 )); then
+        printf '%s' "$out"
+    fi
+    return "$rc"
 }
 
 # shellcheck shell=bash
@@ -2744,7 +3115,9 @@ stacked_bar() {
 # 用 add_field 时记录下来的下标定位，不写死 6/8/10，后续增删字段更安全。
 _profile_begin 'layout measure'
 measure_fields
-if (( ${#GPU_IDENTITY_LINES[@]} > 0 )); then
+# GPU 行本身已经在 FIELD_VALUES 里参与过测量；只有 DATA_W 被上限截断时
+# 才需要单独放行长 GPU 型号，避免正常情况再起一次 Perl 测同一串文本。
+if (( ${#GPU_IDENTITY_LINES[@]} > 0 )) && (( DATA_W >= DATA_MAX )); then
     for gpu_identity in "${GPU_IDENTITY_LINES[@]}"; do
         ensure_data_width "$gpu_identity"
     done
@@ -2753,40 +3126,49 @@ ensure_centered_width "$server_display"
 ensure_centered_width "$client_display"
 _profile_end
 _profile_begin 'format values'
-FIELD_VALUES[MEM_USED_ROW]=$(align_mem_percent \
-    "$used_display" "$mem_used_percent" "$C_BAR_USED")
-FIELD_VALUES[MEM_CACHE_ROW]=$(align_mem_percent \
-    "$cache_display" "$mem_cache_percent" "$C_BAR_CACHE")
-FIELD_VALUES[MEM_FREE_ROW]=$(align_mem_percent \
-    "$free_display" "$mem_free_percent" "$C_BAR_FREE")
-FIELD_VALUES[MEM_SHARED_ROW]=$(align_mem_percent \
-    "$shared_display" "$mem_shared_percent" "$C_MEM_SHARED")
-FIELD_VALUES[MEM_AVAILABLE_ROW]=$(align_mem_percent \
-    "$available_display" "$mem_available_percent" "$C_BAR_AVAILABLE")
-FIELD_VALUES[LOAD_1M_ROW]=$(load_display "$load1" "$cpu_cores")
-FIELD_VALUES[LOAD_5M_ROW]=$(load_display "$load5" "$cpu_cores")
-FIELD_VALUES[LOAD_15M_ROW]=$(load_display "$load15" "$cpu_cores")
+_align_mem_percent_into mem_cell \
+    "$used_display" "$mem_used_percent" "$C_BAR_USED"
+FIELD_VALUES[MEM_USED_ROW]=$mem_cell
+_align_mem_percent_into mem_cell \
+    "$cache_display" "$mem_cache_percent" "$C_BAR_CACHE"
+FIELD_VALUES[MEM_CACHE_ROW]=$mem_cell
+_align_mem_percent_into mem_cell \
+    "$free_display" "$mem_free_percent" "$C_BAR_FREE"
+FIELD_VALUES[MEM_FREE_ROW]=$mem_cell
+_align_mem_percent_into mem_cell \
+    "$shared_display" "$mem_shared_percent" "$C_MEM_SHARED"
+FIELD_VALUES[MEM_SHARED_ROW]=$mem_cell
+_align_mem_percent_into mem_cell \
+    "$available_display" "$mem_available_percent" "$C_BAR_AVAILABLE"
+FIELD_VALUES[MEM_AVAILABLE_ROW]=$mem_cell
+_load_display_into load_cell "$load1" "$cpu_cores"
+FIELD_VALUES[LOAD_1M_ROW]=$load_cell
+_load_display_into load_cell "$load5" "$cpu_cores"
+FIELD_VALUES[LOAD_5M_ROW]=$load_cell
+_load_display_into load_cell "$load15" "$cpu_cores"
+FIELD_VALUES[LOAD_15M_ROW]=$load_cell
 for i in "${!GPU_RECORDS[@]}"; do
     IFS=$'\t' read -r gpu_used gpu_total gpu_util <<<"${GPU_RECORDS[i]}"
-    FIELD_VALUES[GPU_MEM_ROWS[i]]=$(gpu_memory_display \
-        "$gpu_used" "$gpu_total")
-    FIELD_VALUES[GPU_UTIL_ROWS[i]]=$(gpu_util_display "$gpu_util")
+    _gpu_memory_display_into gpu_cell "$gpu_used" "$gpu_total"
+    FIELD_VALUES[GPU_MEM_ROWS[i]]=$gpu_cell
+    _gpu_util_display_into gpu_cell "$gpu_util"
+    FIELD_VALUES[GPU_UTIL_ROWS[i]]=$gpu_cell
 done
 for i in "${!DISK_BAR_ROWS[@]}"; do
-    FIELD_VALUES[DISK_BAR_ROWS[i]]=$(disk_usage_display "${DISK_BAR_PCTS[i]}")
+    _disk_usage_display_into disk_cell "${DISK_BAR_PCTS[i]}"
+    FIELD_VALUES[DISK_BAR_ROWS[i]]=$disk_cell
 done
-MEM_PERCENT_SUFFIX=$(format_percent_suffix "$mem_used_percent")
+_format_percent_suffix_into MEM_PERCENT_SUFFIX "$mem_used_percent"
 MEM_BAR_WIDTH=$((DATA_W - ${#MEM_PERCENT_SUFFIX}))
 (( MEM_BAR_WIDTH > 0 )) || MEM_BAR_WIDTH=1
-FIELD_VALUES[MEM_BAR_ROW]=$(
-    stacked_bar "$mem_total" "$MEM_BAR_WIDTH" \
-        "$mem_used"  '█' "$C_BAR_USED" \
-        "$mem_cache" '▓' "$C_BAR_CACHE" \
-        "$mem_free"  '░' "$C_BAR_FREE"
-)
-FIELD_VALUES[MEM_BAR_ROW]+=$MEM_PERCENT_SUFFIX
+_stacked_bar_into mem_bar_cell "$mem_total" "$MEM_BAR_WIDTH" \
+    "$mem_used"  '█' "$C_BAR_USED" \
+    "$mem_cache" '▓' "$C_BAR_CACHE" \
+    "$mem_free"  '░' "$C_BAR_FREE"
+FIELD_VALUES[MEM_BAR_ROW]=$mem_bar_cell$MEM_PERCENT_SUFFIX
 
-FIELD_VALUES[MEM_TOTAL_ROW]=$(align_row_ends "$total_display" "$mem_status")
+_align_row_ends_into mem_total_cell "$total_display" "$mem_status"
+FIELD_VALUES[MEM_TOTAL_ROW]=$mem_total_cell
 _profile_end
 
 # ── [REPORT] 最终渲染 ──────────────────────────────────────────────────

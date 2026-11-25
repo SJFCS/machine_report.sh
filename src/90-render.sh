@@ -7,7 +7,9 @@
 # 用 add_field 时记录下来的下标定位，不写死 6/8/10，后续增删字段更安全。
 _profile_begin 'layout measure'
 measure_fields
-if (( ${#GPU_IDENTITY_LINES[@]} > 0 )); then
+# GPU 行本身已经在 FIELD_VALUES 里参与过测量；只有 DATA_W 被上限截断时
+# 才需要单独放行长 GPU 型号，避免正常情况再起一次 Perl 测同一串文本。
+if (( ${#GPU_IDENTITY_LINES[@]} > 0 )) && (( DATA_W >= DATA_MAX )); then
     for gpu_identity in "${GPU_IDENTITY_LINES[@]}"; do
         ensure_data_width "$gpu_identity"
     done
@@ -16,40 +18,49 @@ ensure_centered_width "$server_display"
 ensure_centered_width "$client_display"
 _profile_end
 _profile_begin 'format values'
-FIELD_VALUES[MEM_USED_ROW]=$(align_mem_percent \
-    "$used_display" "$mem_used_percent" "$C_BAR_USED")
-FIELD_VALUES[MEM_CACHE_ROW]=$(align_mem_percent \
-    "$cache_display" "$mem_cache_percent" "$C_BAR_CACHE")
-FIELD_VALUES[MEM_FREE_ROW]=$(align_mem_percent \
-    "$free_display" "$mem_free_percent" "$C_BAR_FREE")
-FIELD_VALUES[MEM_SHARED_ROW]=$(align_mem_percent \
-    "$shared_display" "$mem_shared_percent" "$C_MEM_SHARED")
-FIELD_VALUES[MEM_AVAILABLE_ROW]=$(align_mem_percent \
-    "$available_display" "$mem_available_percent" "$C_BAR_AVAILABLE")
-FIELD_VALUES[LOAD_1M_ROW]=$(load_display "$load1" "$cpu_cores")
-FIELD_VALUES[LOAD_5M_ROW]=$(load_display "$load5" "$cpu_cores")
-FIELD_VALUES[LOAD_15M_ROW]=$(load_display "$load15" "$cpu_cores")
+_align_mem_percent_into mem_cell \
+    "$used_display" "$mem_used_percent" "$C_BAR_USED"
+FIELD_VALUES[MEM_USED_ROW]=$mem_cell
+_align_mem_percent_into mem_cell \
+    "$cache_display" "$mem_cache_percent" "$C_BAR_CACHE"
+FIELD_VALUES[MEM_CACHE_ROW]=$mem_cell
+_align_mem_percent_into mem_cell \
+    "$free_display" "$mem_free_percent" "$C_BAR_FREE"
+FIELD_VALUES[MEM_FREE_ROW]=$mem_cell
+_align_mem_percent_into mem_cell \
+    "$shared_display" "$mem_shared_percent" "$C_MEM_SHARED"
+FIELD_VALUES[MEM_SHARED_ROW]=$mem_cell
+_align_mem_percent_into mem_cell \
+    "$available_display" "$mem_available_percent" "$C_BAR_AVAILABLE"
+FIELD_VALUES[MEM_AVAILABLE_ROW]=$mem_cell
+_load_display_into load_cell "$load1" "$cpu_cores"
+FIELD_VALUES[LOAD_1M_ROW]=$load_cell
+_load_display_into load_cell "$load5" "$cpu_cores"
+FIELD_VALUES[LOAD_5M_ROW]=$load_cell
+_load_display_into load_cell "$load15" "$cpu_cores"
+FIELD_VALUES[LOAD_15M_ROW]=$load_cell
 for i in "${!GPU_RECORDS[@]}"; do
     IFS=$'\t' read -r gpu_used gpu_total gpu_util <<<"${GPU_RECORDS[i]}"
-    FIELD_VALUES[GPU_MEM_ROWS[i]]=$(gpu_memory_display \
-        "$gpu_used" "$gpu_total")
-    FIELD_VALUES[GPU_UTIL_ROWS[i]]=$(gpu_util_display "$gpu_util")
+    _gpu_memory_display_into gpu_cell "$gpu_used" "$gpu_total"
+    FIELD_VALUES[GPU_MEM_ROWS[i]]=$gpu_cell
+    _gpu_util_display_into gpu_cell "$gpu_util"
+    FIELD_VALUES[GPU_UTIL_ROWS[i]]=$gpu_cell
 done
 for i in "${!DISK_BAR_ROWS[@]}"; do
-    FIELD_VALUES[DISK_BAR_ROWS[i]]=$(disk_usage_display "${DISK_BAR_PCTS[i]}")
+    _disk_usage_display_into disk_cell "${DISK_BAR_PCTS[i]}"
+    FIELD_VALUES[DISK_BAR_ROWS[i]]=$disk_cell
 done
-MEM_PERCENT_SUFFIX=$(format_percent_suffix "$mem_used_percent")
+_format_percent_suffix_into MEM_PERCENT_SUFFIX "$mem_used_percent"
 MEM_BAR_WIDTH=$((DATA_W - ${#MEM_PERCENT_SUFFIX}))
 (( MEM_BAR_WIDTH > 0 )) || MEM_BAR_WIDTH=1
-FIELD_VALUES[MEM_BAR_ROW]=$(
-    stacked_bar "$mem_total" "$MEM_BAR_WIDTH" \
-        "$mem_used"  '█' "$C_BAR_USED" \
-        "$mem_cache" '▓' "$C_BAR_CACHE" \
-        "$mem_free"  '░' "$C_BAR_FREE"
-)
-FIELD_VALUES[MEM_BAR_ROW]+=$MEM_PERCENT_SUFFIX
+_stacked_bar_into mem_bar_cell "$mem_total" "$MEM_BAR_WIDTH" \
+    "$mem_used"  '█' "$C_BAR_USED" \
+    "$mem_cache" '▓' "$C_BAR_CACHE" \
+    "$mem_free"  '░' "$C_BAR_FREE"
+FIELD_VALUES[MEM_BAR_ROW]=$mem_bar_cell$MEM_PERCENT_SUFFIX
 
-FIELD_VALUES[MEM_TOTAL_ROW]=$(align_row_ends "$total_display" "$mem_status")
+_align_row_ends_into mem_total_cell "$total_display" "$mem_status"
+FIELD_VALUES[MEM_TOTAL_ROW]=$mem_total_cell
 _profile_end
 
 # ── [REPORT] 最终渲染 ──────────────────────────────────────────────────

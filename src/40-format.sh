@@ -104,26 +104,40 @@ human_bytes() {
 # [FORMAT] format_percent_text VALUE -> 右侧对齐的百分比，非法值占 6 列。
 # 正常值先占 5 列再追加 %，例如 " 82.5%" 共 6 列；>= 1000% 会自然加宽。
 # 用法：text=$(format_percent_text 82.5)
-format_percent_text() {
-    local value=${1-} text
-    if ! is_number "$value"; then
-        printf '%6s' '-'
+_format_percent_text_into() {
+    local __var=$1 __value=${2-} __pct_text
+    if ! is_number "$__value"; then
+        printf -v "$__var" '%6s' '-'
         return 0
     fi
-    if ! printf -v text '%5.1f%%' "$value" 2>/dev/null; then
-        printf '%6s' '-'
+    if ! printf -v __pct_text '%5.1f%%' "$__value" 2>/dev/null; then
+        printf -v "$__var" '%6s' '-'
         return 0
     fi
-    case $text in
-        *[Nn][Aa][Nn]*|*[Ii][Nn][Ff]*) printf '%6s' '-' ;;
-        *) printf '%s' "$text" ;;
+    case $__pct_text in
+        *[Nn][Aa][Nn]*|*[Ii][Nn][Ff]*) printf -v "$__var" '%6s' '-' ;;
+        *) printf -v "$__var" '%s' "$__pct_text" ;;
     esac
+}
+
+format_percent_text() {
+    local out
+    _format_percent_text_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] format_percent_suffix VALUE -> 带一个前导空格的百分比后缀。
 # 用法：suffix=$(format_percent_suffix 82.5)；宽度=${#suffix}
+_format_percent_suffix_into() {
+    local __var=$1 __suffix_text
+    _format_percent_text_into __suffix_text "${2-}"
+    printf -v "$__var" ' %s' "$__suffix_text"
+}
+
 format_percent_suffix() {
-    printf ' %s' "$(format_percent_text "${1-}")"
+    local out
+    _format_percent_suffix_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] format_mib_as_gib MIB -> 一位小数的 GiB 数值，不带单位。

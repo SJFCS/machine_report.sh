@@ -18,9 +18,25 @@ dmi_field() {
 # [HANDLER] darwin_field KEY -> 读取 ioreg 中的平台字段。
 # 用法：model=$(darwin_field model)
 darwin_field() {
-    local key=$1
-    ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null |
-        awk -F'"' -v key="$key" '$2 == key { print $4; exit }'
+    local raw=${DARWIN_PLATFORM_RAW:-} line value
+    local prefix="\"${1-}\" = "
+    if [ -z "$raw" ]; then
+        raw=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null)
+    fi
+    # 只用内建字符串处理解析，不再为每个字段起一次 awk。
+    while IFS= read -r line; do
+        case $line in
+            *"$prefix"*) ;;
+            *) continue ;;
+        esac
+        value=${line#*"$prefix"}
+        value=${value#<}
+        value=${value%>}
+        value=${value#\"}
+        value=${value%\"}
+        printf '%s\n' "$value"
+        return 0
+    done <<<"$raw"
 }
 
 # [HANDLER] detect_manufacturer -> 输出服务器厂商；未知时为 UNKNOWN。
@@ -148,11 +164,21 @@ detect_timezone() {
     printf '%s' "$value"
 }
 
+# [HANDLER] login_who_line -> `who am i` 的本次运行首次输出。
+# 用户和客户端都来自同一行，取一次即可，避免 session 阶段跑两次 who。
+login_who_line() {
+    if [ -z "${LOGIN_WHO_AM_I_LOADED:-}" ]; then
+        LOGIN_WHO_AM_I=$(who am i 2>/dev/null)
+        LOGIN_WHO_AM_I_LOADED=1
+    fi
+    printf '%s' "$LOGIN_WHO_AM_I"
+}
+
 # [HANDLER] detect_login_user -> 当前登录用户，who 为空时回退环境变量。
 # 用法：user=$(detect_login_user)
 detect_login_user() {
-    local user
-    read -r user _ < <(who am i 2>/dev/null) || true
+    local user=''
+    read -r user _ <<<"$(login_who_line)" || true
     [ -n "$user" ] || user=${USER:-$(id -un)}
     printf '%s' "$user"
 }
@@ -166,7 +192,7 @@ detect_login_client() {
     elif [ -n "${SSH_CONNECTION:-}" ]; then
         client=${SSH_CONNECTION%% *}
     else
-        line=$(who am i 2>/dev/null | sed -n '1p')
+        line=$(login_who_line)
         if [[ $line == *'('*')'* ]]; then
             client=${line##*\(}
             client=${client%%)*}
@@ -183,6 +209,26 @@ detect_login_client() {
 # 用法：while IFS=$'\t' read -r iface ip; do ...; done < <(collect_network_interfaces)
 collect_network_interfaces() {
     local iface state address rest
+
+    # macOS 默认没有 ip；Homebrew 的 iproute2mac 单次约 40 ms，
+    # 而系统自带 ifconfig 通常只要几毫秒。这里优先用 ifconfig，
+    # 并保持与下面 ip 分支相同的接口过滤规则。
+    if [ "$platform_name" = Darwin ] &&
+        command -v ifconfig >/dev/null 2>&1; then
+        LC_ALL=C ifconfig 2>/dev/null | awk '
+            /^[A-Za-z0-9_.-]+:/ {
+                iface = $1
+                sub(/:$/, "", iface)
+            }
+            $1 == "inet" && $2 != "" && $2 != "127.0.0.1" {
+                if (iface ~ /^(lo|docker|virbr|veth|br-|cni|flannel|cali|kube|tun|tap)/)
+                    next
+                print iface "\t" $2
+            }
+        '
+        return
+    fi
+
     if command -v ip >/dev/null 2>&1; then
         while read -r iface state address rest; do
             [ -n "$iface" ] || continue
@@ -227,6 +273,11 @@ collect_dns_servers() {
 }
 
 _profile_begin 'platform'
+if [ "$platform_name" = Darwin ]; then
+    # 厂商、型号和 UUID 都会读同一份 IOPlatformExpertDevice；先取一次，
+    # 后续 darwin_field 直接复用，避免每个字段都启动一次 ioreg。
+    DARWIN_PLATFORM_RAW=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null)
+fi
 server_manufacturer=$(detect_manufacturer)
 server_product_name=$(detect_product_name)
 virt_type=$(detect_virtualization)

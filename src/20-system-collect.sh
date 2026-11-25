@@ -50,12 +50,19 @@ server_arch=$(uname -m 2>/dev/null)
 
 # [HANDLER] detect_os_name -> 本机操作系统展示名称。
 detect_os_name() {
-    local value='' version=''
+    local value='' key val product_name='' product_version=''
     if [ "$platform_name" = Darwin ] &&
         command -v sw_vers >/dev/null 2>&1; then
-        value=$(sw_vers -productName 2>/dev/null)
-        version=$(sw_vers -productVersion 2>/dev/null)
-        printf '%s' "${value:-macOS}${version:+ $version}"
+        # sw_vers 不带参数时一次输出全部字段，避免每取一项起一个进程。
+        while IFS=: read -r key val; do
+            val=${val#"${val%%[![:space:]]*}"}
+            case $key in
+                ProductName) product_name=$val ;;
+                ProductVersion) product_version=$val ;;
+            esac
+        done < <(sw_vers 2>/dev/null)
+        printf '%s' \
+            "${product_name:-macOS}${product_version:+ $product_version}"
         return
     fi
     if [ -r /etc/os-release ]; then
@@ -86,11 +93,16 @@ collect_cpu_scalars() {
     local model='' sockets_text='' cores_text='' min_text='' max_text=''
     local sockets=1 total_cores=1 min_mhz=0 max_mhz=0 frequency='-' i
     local key value cores_per_socket=0
+    local sysctl_raw=''
 
     if [ "$platform_name" = Darwin ]; then
-        model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)
+        # 型号和核数合并成一次 sysctl 调用，输出按行对应各个 key。
+        sysctl_raw=$(sysctl -n machdep.cpu.brand_string hw.ncpu 2>/dev/null)
+        model=${sysctl_raw%%$'\n'*}
+        if [[ $sysctl_raw == *$'\n'* ]]; then
+            total_cores=${sysctl_raw#*$'\n'}
+        fi
         [ -n "$model" ] || model=$(sysctl -n hw.model 2>/dev/null)
-        total_cores=$(sysctl -n hw.ncpu 2>/dev/null)
     else
         if command -v lscpu >/dev/null 2>&1; then
             lscpu_output=$(LC_ALL=C lscpu 2>/dev/null)

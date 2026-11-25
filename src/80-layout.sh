@@ -101,9 +101,9 @@ _format_report_lines() {
 # 普通十进制先转成定点整数计算块数；异常输入才回退 awk。
 # 省略 WIDTH 时使用 DATA_W。
 # 用法：graph=$(bar 42.5 100 20)
-bar() {
-    local used=${1-0} total=${2-0} width=${3:-${DATA_W:-0}}
-    local blocks scaled_used scaled_total
+_bar_into() {
+    local __var=$1 used=${2-0} total=${3-0} width=${4:-${DATA_W:-0}}
+    local blocks scaled_used scaled_total filled empty
 
     is_number "$used" || used=0
     is_number "$total" || total=0
@@ -127,57 +127,90 @@ bar() {
         }')
     fi
 
-    printf '%s%s' \
-        "$(repeat_char '█' "$blocks")" \
-        "$(repeat_char '░' "$((width - blocks))")"
+    _repeat_char_into filled '█' "$blocks"
+    _repeat_char_into empty '░' "$((width - blocks))"
+    printf -v "$__var" '%s%s' "$filled" "$empty"
+}
+
+bar() {
+    local out
+    _bar_into out "$@"
+    printf '%s' "$out"
 }
 
 # [TABLE] percent_bar_display VALUE TOTAL PERCENT -> 条形图 + 百分比文本。
 # 用法：cell=$(percent_bar_display 42.5 100 42.5)
-percent_bar_display() {
-    local value=$1 total=$2 percent=$3 suffix graph_width
-    suffix=$(format_percent_suffix "$percent")
+_percent_bar_display_into() {
+    local __var=$1 value=$2 total=$3 percent=$4
+    local suffix graph_width graph
+    _format_percent_suffix_into suffix "$percent"
     graph_width=$((DATA_W - ${#suffix}))
     (( graph_width > 0 )) || graph_width=1
-    printf '%s%s' "$(bar "$value" "$total" "$graph_width")" "$suffix"
+    _bar_into graph "$value" "$total" "$graph_width"
+    printf -v "$__var" '%s%s' "$graph" "$suffix"
+}
+
+percent_bar_display() {
+    local out
+    _percent_bar_display_into out "$@"
+    printf '%s' "$out"
 }
 
 # [FORMAT] disk_usage_display PERCENT -> 磁盘使用率条形图值列。
 # 用法：cell=$(disk_usage_display 42.5)
+_disk_usage_display_into() {
+    local __var=$1 percent=${2-}
+    _percent_bar_display_into "$__var" "$percent" 100 "$percent"
+}
+
 disk_usage_display() {
-    local percent=$1
-    percent_bar_display "$percent" 100 "$percent"
+    local out
+    _disk_usage_display_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] gpu_memory_display USED_MIB TOTAL_MIB -> 显存条形图和 GiB 文本。
 # 用法：cell=$(gpu_memory_display 64000 81920)
-gpu_memory_display() {
-    local used_mib=$1 total_mib=$2
-    local percent used_gib total_gib suffix graph_width
+_gpu_memory_display_into() {
+    local __var=$1 used_mib=$2 total_mib=$3
+    local percent used_gib total_gib suffix percent_text
+    local graph_width graph
     percent=$(percent_of "$used_mib" "$total_mib")
     used_gib=$(format_mib_as_gib "$used_mib")
     total_gib=$(format_mib_as_gib "$total_mib")
-    printf -v suffix ' %s/%s GiB %s' \
-        "$used_gib" "$total_gib" "$(format_percent_text "$percent")"
+    _format_percent_text_into percent_text "$percent"
+    suffix=" ${used_gib}/${total_gib} GiB ${percent_text}"
     graph_width=$((DATA_W - ${#suffix}))
     (( graph_width > 0 )) || graph_width=1
-    printf '%s%s' \
-        "$(bar "$used_mib" "$total_mib" "$graph_width")" "$suffix"
+    _bar_into graph "$used_mib" "$total_mib" "$graph_width"
+    printf -v "$__var" '%s%s' "$graph" "$suffix"
+}
+
+gpu_memory_display() {
+    local out
+    _gpu_memory_display_into out "$@"
+    printf '%s' "$out"
 }
 
 # [FORMAT] gpu_util_display PERCENT -> GPU 利用率条形图值列。
 # 用法：cell=$(gpu_util_display 91)
+_gpu_util_display_into() {
+    local __var=$1 percent=${2-}
+    _percent_bar_display_into "$__var" "$percent" 100 "$percent"
+}
+
 gpu_util_display() {
-    local percent=$1
-    percent_bar_display "$percent" 100 "$percent"
+    local out
+    _gpu_util_display_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] load_display LOAD CPU_COUNT -> 负载条、负载/核数和百分比。
 # 用法：cell=$(load_display 25.60 128)
-load_display() {
-    local load=$1 cores=$2
+_load_display_into() {
+    local __var=$1 load=$2 cores=$3
     local percent load_text percent_text suffix
-    local graph_width
+    local graph_width graph
 
     percent=$(percent_of "$load" "$cores")
     if is_number "$load"; then
@@ -185,13 +218,20 @@ load_display() {
     else
         load_text='    -'
     fi
-    percent_text=$(format_percent_text "$percent")
+    _format_percent_text_into percent_text "$percent"
     # 先拼出完整的右侧文字，再按实际长度扣减条形宽度，避免每加一个
     # 分隔符就要同步修改一个魔法数字。
     printf -v suffix ' %s/%s %s' "$load_text" "$cores" "$percent_text"
     graph_width=$((DATA_W - ${#suffix}))
     (( graph_width > 0 )) || graph_width=1
-    printf '%s%s' "$(bar "$load" "$cores" "$graph_width")" "$suffix"
+    _bar_into graph "$load" "$cores" "$graph_width"
+    printf -v "$__var" '%s%s' "$graph" "$suffix"
+}
+
+load_display() {
+    local out
+    _load_display_into out "$@"
+    printf '%s' "$out"
 }
 
 # [TABLE] stacked_bar TOTAL WIDTH VALUE CHAR COLOR ... -> 彩色分段堆叠条。
@@ -210,9 +250,9 @@ load_display() {
 #
 # 字符用 █ / ▓ / ░ 区分，即使 NO_COLOR=1 或输出到日志文件，也能看出
 # 三段结构；终端里则由颜色进一步区分 used、buff/cache 和 free。
-stacked_bar() {
-    local total=${1-0} width=${2-0}
-    shift 2
+_stacked_bar_into() {
+    local __var=$1 total=${2-0} width=${3-0}
+    shift 3
 
     is_number "$total" || total=0
     [[ $width =~ ^[0-9]+$ ]] || width=0
@@ -233,6 +273,7 @@ stacked_bar() {
     done
 
     if (( ${#values[@]} == 0 || width <= 0 )); then
+        printf -v "$__var" '%s' ''
         return 0
     fi
 
@@ -291,24 +332,32 @@ stacked_bar() {
             '
     )
 
-    local i blocks_used=0
+    local i blocks_used=0 __bar_out='' __segment
     for i in "${!values[@]}"; do
         count=${counts[i]:-0}
         if (( count > 0 )); then
-            printf '%s%s%s' \
-                "${colors[i]}" \
-                "$(repeat_char "${chars[i]}" "$count")" \
-                "$C_RESET"
+            _repeat_char_into __segment "${chars[i]}" "$count"
+            __bar_out+="${colors[i]}${__segment}${C_RESET}"
             blocks_used=$((blocks_used + count))
         fi
     done
 
     # total 大于各段之和时，剩余部分用中性背景补齐，仍保持 WIDTH 列。
     if (( blocks_used < width )); then
-        printf '%s%s%s' \
-            "$C_BAR_EMPTY" \
-            "$(repeat_char '░' "$((width - blocks_used))")" \
-            "$C_RESET"
+        _repeat_char_into __segment '░' "$((width - blocks_used))"
+        __bar_out+="${C_BAR_EMPTY}${__segment}${C_RESET}"
     fi
+
+    printf -v "$__var" '%s' "$__bar_out"
+}
+
+stacked_bar() {
+    local out rc
+    _stacked_bar_into out "$@"
+    rc=$?
+    if (( rc == 0 )); then
+        printf '%s' "$out"
+    fi
+    return "$rc"
 }
 

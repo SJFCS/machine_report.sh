@@ -5,11 +5,20 @@
 # 两侧都可以带 ANSI；省略 WIDTH 时使用当前 DATA_W。
 # 用法：line=$(align_row_ends "$left" "$right")
 
-align_row_ends() {
-    local left=$1 right=$2 width=${3:-$DATA_W} gap
-    gap=$((width - $(display_width "$left") - $(display_width "$right")))
+_align_row_ends_into() {
+    local __var=$1 left=$2 right=$3 width=${4:-$DATA_W}
+    local gap left_width right_width
+    _display_width_into left_width "$left"
+    _display_width_into right_width "$right"
+    gap=$((width - left_width - right_width))
     (( gap >= 1 )) || gap=1
-    printf '%s%*s%s' "$left" "$gap" '' "$right"
+    printf -v "$__var" '%s%*s%s' "$left" "$gap" '' "$right"
+}
+
+align_row_ends() {
+    local out
+    _align_row_ends_into out "$@"
+    printf '%s' "$out"
 }
 
 # [FORMAT] format_quantity QTY UNIT COLOR WIDTH -> 左对齐数量 + 固定单位。
@@ -28,29 +37,18 @@ format_mem_quantity() {
 
 # [FORMAT] align_mem_percent LABEL PCT COLOR -> 左数量、右百分比的整行值。
 # 用法：row=$(align_mem_percent "$display" 82.5 "$C_BAR_USED")
-align_mem_percent() {
-    local metric=$1 percent=$2 color=$3 percent_text
-    percent_text=$(format_percent_text "$percent")
-    align_row_ends "$metric" "${color}${percent_text}${C_RESET}"
+_align_mem_percent_into() {
+    local __var=$1 metric=$2 percent=$3 color=$4 __mem_pct_text
+    _format_percent_text_into __mem_pct_text "$percent"
+    _align_row_ends_into "$__var" "$metric" \
+        "${color}${__mem_pct_text}${C_RESET}"
 }
 
-mem_used_percent=$(percent_of "$mem_used" "$mem_total")
-mem_free_percent=$(percent_of "$mem_free" "$mem_total")
-mem_shared_percent=$(percent_of "$mem_shared" "$mem_total")
-mem_cache_percent=$(percent_of "$mem_cache" "$mem_total")
-mem_available_percent=$(percent_of "$mem_available" "$mem_total")
-
-# 统一格式化为一位小数，避免 16 和 3.2 的小数点无法纵向对齐。
-printf -v mem_total_qty     '%.1f' "$mem_total"
-printf -v mem_used_qty      '%.1f' "$mem_used"
-printf -v mem_free_qty      '%.1f' "$mem_free"
-printf -v mem_shared_qty    '%.1f' "$mem_shared"
-printf -v mem_cache_qty     '%.1f' "$mem_cache"
-printf -v mem_available_qty '%.1f' "$mem_available"
-
-MEM_QTY_W=$(max_display_width \
-    "$mem_total_qty" "$mem_used_qty" "$mem_free_qty" \
-    "$mem_shared_qty" "$mem_cache_qty" "$mem_available_qty")
+align_mem_percent() {
+    local out
+    _align_mem_percent_into out "$@"
+    printf '%s' "$out"
+}
 
 # “是否正常”看 available，而不是看 used：used 高不代表新进程没有内存
 # 可用，因为 buff/cache 中可以回收一部分。阈值可按业务调整；这里采用
@@ -77,6 +75,24 @@ memory_status_text() {
         *)    printf '%s●可用内存危险%s' "$C_CRIT" "$C_RESET" ;;
     esac
 }
+
+mem_used_percent=$(percent_of "$mem_used" "$mem_total")
+mem_free_percent=$(percent_of "$mem_free" "$mem_total")
+mem_shared_percent=$(percent_of "$mem_shared" "$mem_total")
+mem_cache_percent=$(percent_of "$mem_cache" "$mem_total")
+mem_available_percent=$(percent_of "$mem_available" "$mem_total")
+
+# 统一格式化为一位小数，避免 16 和 3.2 的小数点无法纵向对齐。
+printf -v mem_total_qty     '%.1f' "$mem_total"
+printf -v mem_used_qty      '%.1f' "$mem_used"
+printf -v mem_free_qty      '%.1f' "$mem_free"
+printf -v mem_shared_qty    '%.1f' "$mem_shared"
+printf -v mem_cache_qty     '%.1f' "$mem_cache"
+printf -v mem_available_qty '%.1f' "$mem_available"
+
+MEM_QTY_W=$(max_display_width \
+    "$mem_total_qty" "$mem_used_qty" "$mem_free_qty" \
+    "$mem_shared_qty" "$mem_cache_qty" "$mem_available_qty")
 
 mem_status=$(memory_status_text \
     "$mem_available_percent" "$MEM_OK_PERCENT" "$MEM_WARN_PERCENT")
@@ -109,30 +125,44 @@ add_field() {
 # [FORMAT] color_kv_segment "KEY VALUE" -> 青色键、黄色值。
 # 没有空格的段落整段按值着色，适合 '-' 等占位符。
 # 用法：colored=$(color_kv_segment 'TYPE SSD')
-color_kv_segment() {
-    local part=$1 key value
+_color_kv_segment_into() {
+    local __var=$1 part=$2 key value
     if [[ "$part" == *" "* ]]; then
         key=${part%% *}
         value=${part#* }
-        printf '%s%s%s %s%s%s' \
+        printf -v "$__var" '%s%s%s %s%s%s' \
             "$C_K" "$key" "$C_RESET" \
             "$C_V" "$value" "$C_RESET"
     else
-        printf '%s%s%s' "$C_V" "$part" "$C_RESET"
+        printf -v "$__var" '%s%s%s' "$C_V" "$part" "$C_RESET"
     fi
+}
+
+color_kv_segment() {
+    local out
+    _color_kv_segment_into out "${1-}"
+    printf '%s' "$out"
 }
 
 # [FORMAT] color_kv_segments TEXT -> 统一着色以 " · " 分隔的 KV 段落。
 # 只处理颜色和分隔符，不补齐宽度；应先用 pad_display 对齐各列。
 # 用法：colored=$(color_kv_segments 'DISK sda · TYPE SSD')
-color_kv_segments() {
-    local rest=$1 part out=''
+_color_kv_segments_into() {
+    local __var=$1 rest=${2-} part __kv_part_out __kv_out=''
     while [[ "$rest" == *" · "* ]]; do
         part=${rest%% · *}
-        out+="$(color_kv_segment "$part") · "
+        _color_kv_segment_into __kv_part_out "$part"
+        __kv_out+="${__kv_part_out} · "
         rest=${rest#* · }
     done
-    out+=$(color_kv_segment "$rest")
+    _color_kv_segment_into __kv_part_out "$rest"
+    __kv_out+=$__kv_part_out
+    printf -v "$__var" '%s' "$__kv_out"
+}
+
+color_kv_segments() {
+    local out
+    _color_kv_segments_into out "${1-}"
     printf '%s' "$out"
 }
 

@@ -20,18 +20,29 @@ collect_macos_gpu_rows() {
 
     raw=$(ioreg -r -c AGXAccelerator -d 1 2>/dev/null)
     if [ -n "$raw" ]; then
-        model=$(printf '%s\n' "$raw" | sed -n \
-            's/.*"model"[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' |
-            head -n 1)
-        cores=$(printf '%s\n' "$raw" | sed -n \
-            's/.*"gpu-core-count"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
-            head -n 1)
-        util=$(printf '%s\n' "$raw" | sed -n \
-            's/.*"Device Utilization %"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
-            head -n 1)
-        used_bytes=$(printf '%s\n' "$raw" | sed -n \
-            's/.*"In use system memory"[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
-            head -n 1)
+        # 四组字段来自同一份 ioreg 输出，合成一次 awk 解析，
+        # 避免为 model/cores/util/used 各起一条 sed + head 管道。
+        IFS=$'\t' read -r model cores util used_bytes < <(
+            printf '%s\n' "$raw" | awk -F'"' '
+                function field_value(   value) {
+                    value = $4
+                    if (value == "") {
+                        value = $3
+                        sub(/^[^0-9]*/, "", value)
+                        sub(/[^0-9].*$/, "", value)
+                    }
+                    return value
+                }
+                $2 == "model" && model == "" { model = field_value() }
+                $2 == "gpu-core-count" && cores == "" { cores = field_value() }
+                $2 == "Device Utilization %" && util == "" { util = field_value() }
+                $2 == "In use system memory" && used == "" { used = field_value() }
+                END { print model "\t" cores "\t" util "\t" used }
+            '
+        )
+        [[ $cores =~ ^[0-9]+$ ]] || cores=''
+        [[ $util =~ ^[0-9]+$ ]] || util=''
+        [[ $used_bytes =~ ^[0-9]+$ ]] || used_bytes=''
     fi
 
     if [ -z "$model" ]; then
@@ -245,67 +256,78 @@ disk_smart_info() {
         return 0
     }
 
-    health=$(printf '%s\n' "$raw" | sed -n \
-        's/^SMART overall-health self-assessment test result:[[:space:]]*//p' |
-        head -n 1)
-    [ -n "$health" ] || health=$(printf '%s\n' "$raw" | sed -n \
-        's/^SMART Health Status:[[:space:]]*//p' | head -n 1)
-    health=$(printf '%s' "$health" | awk '{ print toupper($1) }')
-    health=${health%!}
-
-    wear=$(printf '%s\n' "$raw" | sed -n \
-        's/.*Percentage Used:[[:space:]]*\([0-9][0-9]*\)%.*/\1/p' |
-        head -n 1)
-    if [ -z "$wear" ]; then
-        # SATA 属性的 VALUE 列（$4）是规范化的剩余寿命；WHEN_FAILED 为空
-        # 时列数会变化，但 VALUE 始终位于 FLAG 之后，因此 $4 仍然稳定。
-        wear=$(printf '%s\n' "$raw" | awk '
-            $2 ~ /(Wear|Life)/ && $2 ~ /(Indicator|Left|Remain|Leveling)/ {
-                if ($4 ~ /^[0-9]+$/) {
-                    wear = 100 - $4
-                    if (wear < 0) wear = 0
-                    if (wear > 100) wear = 100
-                    print wear
-                    exit
-                }
-            }
-        ')
-    fi
-    [[ $wear =~ ^[0-9]+$ ]] || wear='-'
-
-    # RAW_VALUE 是最后一个字段；不能依赖固定列号，因为 WHEN_FAILED
-    # 可能为空，且不同 smartctl 版本的列宽和字段数并不完全一致。
-    err_count=$(printf '%s\n' "$raw" | awk '
-        $2 ~ /CRC/ && $2 ~ /(Error|Err)/ && $NF ~ /^[0-9]+$/ {
-            print $NF
-            exit
-        }
-        /[Cc][Rr][Cc].*[Ee]rror/ {
-            for (i = NF; i >= 1; i--) {
-                if ($i ~ /^[0-9]+$/) {
-                    print $i
-                    exit
-                }
-            }
-        }
-    ')
-    if [[ $err_count =~ ^[0-9]+$ ]]; then
-        err_label=CRC
-    else
-        err_count=$(printf '%s\n' "$raw" | awk '
-            /Media and Data Integrity Errors:/ {
+    # smartctl 的健康、寿命和错误计数都来自同一份输出。合成一次 awk，
+    # 避免每块盘起多组 sed/head/awk 管道；字段契约保持不变。
+    IFS=$'\t' read -r health wear err_label err_count < <(
+        printf '%s\n' "$raw" | awk '
+            function last_number(   i) {
                 for (i = NF; i >= 1; i--) {
-                    if ($i ~ /^[0-9]+$/) {
-                        print $i
-                        exit
-                    }
+                    if ($i ~ /^[0-9]+$/) return $i
+                }
+                return ""
+            }
+            {
+                line = $0
+                if (health == "" &&
+                    line ~ /^SMART overall-health self-assessment test result:/) {
+                    sub(/^SMART overall-health self-assessment test result:[[:space:]]*/, "", line)
+                    split(line, parts, /[[:space:]]+/)
+                    health = parts[1]
+                }
+                if (health == "" && line ~ /^SMART Health Status:/) {
+                    sub(/^SMART Health Status:[[:space:]]*/, "", line)
+                    split(line, parts, /[[:space:]]+/)
+                    health = parts[1]
+                }
+                if (wear == "" && match(line, /Percentage Used:[[:space:]]*[0-9]+%/)) {
+                    value = substr(line, RSTART, RLENGTH)
+                    sub(/^Percentage Used:[[:space:]]*/, "", value)
+                    sub(/%$/, "", value)
+                    wear = value
+                }
+                if (sata_wear == "" &&
+                    $2 ~ /(Wear|Life)/ &&
+                    $2 ~ /(Indicator|Left|Remain|Leveling)/ &&
+                    $4 ~ /^[0-9]+$/) {
+                    value = 100 - $4
+                    if (value < 0) value = 0
+                    if (value > 100) value = 100
+                    sata_wear = value
+                }
+                if (crc == "" &&
+                    $2 ~ /CRC/ && $2 ~ /(Error|Err)/ &&
+                    $NF ~ /^[0-9]+$/) {
+                    crc = $NF
+                }
+                if (crc == "" && line ~ /[Cc][Rr][Cc].*[Ee]rror/) {
+                    value = last_number()
+                    if (value != "") crc = value
+                }
+                if (integ == "" && line ~ /Media and Data Integrity Errors:/) {
+                    value = last_number()
+                    if (value != "") integ = value
                 }
             }
-        ')
-        if ! [[ $err_count =~ ^[0-9]+$ ]]; then
-            err_count='-'
-        fi
-    fi
+            END {
+                if (health == "") health = "N/A"
+                health = toupper(health)
+                sub(/!$/, "", health)
+                if (wear == "") wear = (sata_wear != "" ? sata_wear : "-")
+                if (crc != "") {
+                    label = "CRC"
+                    count = crc
+                } else {
+                    label = "INTEG"
+                    count = (integ != "" ? integ : "-")
+                }
+                print health "\t" wear "\t" label "\t" count
+            }
+        '
+    )
+    health=${health:-N/A}
+    wear=${wear:--}
+    err_label=${err_label:-INTEG}
+    err_count=${err_count:--}
     printf '%s\t%s\t%s\t%s\n' \
         "${health:-N/A}" "$wear" "$err_label" "$err_count"
 }
@@ -414,8 +436,43 @@ collect_macos_disk_rows() {
     local used_h avail_h root_name='' link seen=':' smart_device=''
     local smart_info='' smart_health='' smart_wear=''
     local smart_err_label='' smart_err_count=''
-    local last_smart_device='' last_smart_info=''
+    local mount_output row_index j pid
+    local smart_device_list=':' smart_tmpdir=''
+    local total_k='' avail_k=''
+    local -a row_devices=()
+    local -a row_mounts=()
+    local -a smart_devices=()
+    local -a smart_pids=()
+    local -a format_mounts=()
+    local -a format_values=()
+    local -a df_mounts=()
+    local -a df_totals=()
+    local -a df_avails=()
 
+    mount_output=$(mount 2>/dev/null)
+
+    # 一次 df 取回所有挂载点的容量，行循环里按挂载点查表；
+    # 卷多时省掉每个卷一次 df 进程。挂载点可能在空格处被切开，
+    # 因此用正则匹配前五列，剩余整段才是挂载点。
+    while IFS=$'\t' read -r mount total_k avail_k; do
+        [ -n "$mount" ] || continue
+        df_mounts+=("$mount")
+        df_totals+=("$total_k")
+        df_avails+=("$avail_k")
+    done < <(LC_ALL=C df -Pk 2>/dev/null | awk '
+        NR == 1 { next }
+        {
+            line = $0
+            if (!match(line,
+                /^[^ \t]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+%[ \t]+/))
+                next
+            mount = substr(line, RLENGTH + 1)
+            split(substr(line, 1, RLENGTH), parts, /[ \t]+/)
+            print mount "\t" parts[2] "\t" parts[4]
+        }
+    ')
+
+    # 先筛选要展示的卷，保持原有顺序和去重规则。
     while IFS=$'\t' read -r device mount; do
         case $mount in
             /) ;;
@@ -429,11 +486,86 @@ collect_macos_disk_rows() {
             *":$mount:"*) continue ;;
         esac
         seen="${seen}${mount}:"
+        row_devices+=("$device")
+        row_mounts+=("$mount")
+    done < <(printf '%s\n' "$mount_output" |
+        awk '$1 ~ /^\/dev\/disk/ { print $1 "\t" $3 }')
 
-        read -r total_k avail_k < <(
-            LC_ALL=C df -Pk "$mount" 2>/dev/null |
-                awk 'NR == 2 { print $2, $4 }'
-        )
+    if (( ${#row_devices[@]} == 0 )); then
+        return 0
+    fi
+
+    # 不同卷可能映射到同一块物理盘；每块盘只查询一次 SMART。
+    for device in "${row_devices[@]}"; do
+        if [[ $device =~ ^/dev/(disk[0-9]+)s ]]; then
+            smart_device="/dev/${BASH_REMATCH[1]}"
+        else
+            smart_device=$device
+        fi
+        case $smart_device_list in
+            *":$smart_device:"*) ;;
+            *)
+                smart_devices+=("$smart_device")
+                smart_device_list="${smart_device_list}${smart_device}:"
+                ;;
+        esac
+    done
+
+    # smartctl 通常是磁盘阶段最慢的一步。多块盘并行查询，
+    # 墙钟时间由最慢的一块决定，而不是各块盘耗时之和。
+    if (( REPORT_SMART_ENABLED == 1 )) &&
+        (( ${#smart_devices[@]} > 0 )); then
+        smart_tmpdir=$(mktemp -d \
+            "${TMPDIR:-/tmp}/mreport-smart.XXXXXX") || smart_tmpdir=''
+        if [ -n "$smart_tmpdir" ]; then
+            for j in "${!smart_devices[@]}"; do
+                (disk_smart_info "${smart_devices[j]}" \
+                    >"$smart_tmpdir/$j") &
+                smart_pids+=("$!")
+            done
+        fi
+    fi
+
+    # 一次解析所有挂载点的文件系统类型，避免每块盘再起一次 mount|awk|tr。
+    while IFS=$'\t' read -r mount format; do
+        [ -n "$mount" ] || continue
+        format_mounts+=("$mount")
+        format_values+=("$format")
+    done < <(printf '%s\n' "$mount_output" | awk '
+        $1 ~ /^\/dev\/disk/ {
+            value = $0
+            sub(/^.*\(/, "", value)
+            sub(/,.*/, "", value)
+            print $3 "\t" toupper(value)
+        }
+    ')
+
+    if [ -n "$smart_tmpdir" ]; then
+        for pid in "${smart_pids[@]}"; do
+            wait "$pid" || true
+        done
+    fi
+
+    for row_index in "${!row_devices[@]}"; do
+        device=${row_devices[row_index]}
+        mount=${row_mounts[row_index]}
+
+        total_k=''
+        avail_k=''
+        for j in "${!df_mounts[@]}"; do
+            if [ "${df_mounts[j]}" = "$mount" ]; then
+                total_k=${df_totals[j]}
+                avail_k=${df_avails[j]}
+                break
+            fi
+        done
+        # 批量结果里没有这个挂载点时再单独查一次，保证行为不变。
+        if ! [[ $total_k =~ ^[0-9]+$ && $avail_k =~ ^[0-9]+$ ]]; then
+            read -r total_k avail_k < <(
+                LC_ALL=C df -Pk "$mount" 2>/dev/null |
+                    awk 'NR == 2 { print $2, $4 }'
+            )
+        fi
         [[ $total_k =~ ^[0-9]+$ && $avail_k =~ ^[0-9]+$ ]] || continue
         (( total_k > 0 )) || continue
         used_k=$((total_k - avail_k))
@@ -459,27 +591,32 @@ collect_macos_disk_rows() {
             media=EXTERNAL
         fi
 
-        format=$(mount | awk -v target="$mount" '
-            $3 == target {
-                sub(/^.*\(/, "")
-                sub(/,.*/, "")
-                print
-                exit
-            }
-        ')
-        format=$(printf '%s' "${format:-APFS}" | tr '[:lower:]' '[:upper:]')
+        format=''
+        if (( ${#format_mounts[@]} > 0 )); then
+            for j in "${!format_mounts[@]}"; do
+                if [ "${format_mounts[j]}" = "$mount" ]; then
+                    format=${format_values[j]}
+                    break
+                fi
+            done
+        fi
+        format=${format:-APFS}
 
         if [[ $device =~ ^/dev/(disk[0-9]+)s ]]; then
             smart_device="/dev/${BASH_REMATCH[1]}"
         else
             smart_device=$device
         fi
-        if [ "$smart_device" = "$last_smart_device" ]; then
-            smart_info=$last_smart_info
+        if [ -n "$smart_tmpdir" ]; then
+            smart_info=''
+            for j in "${!smart_devices[@]}"; do
+                if [ "${smart_devices[j]}" = "$smart_device" ]; then
+                    smart_info=$(cat "$smart_tmpdir/$j")
+                    break
+                fi
+            done
         else
             smart_info=$(disk_smart_info "$smart_device")
-            last_smart_device=$smart_device
-            last_smart_info=$smart_info
         fi
         IFS=$'\t' read -r smart_health smart_wear \
             smart_err_label smart_err_count <<<"$smart_info"
@@ -488,7 +625,11 @@ collect_macos_disk_rows() {
             "$name" "$size_h" "$media" "$mount" "$percent" \
             "$used_h" "$avail_h" "$format" \
             "$smart_health" "$smart_wear" "$smart_err_label" "$smart_err_count"
-    done < <(mount | awk '$1 ~ /^\/dev\/disk/ { print $1 "\t" $3 }')
+    done
+
+    if [ -n "$smart_tmpdir" ]; then
+        rm -rf -- "$smart_tmpdir"
+    fi
 }
 
 physical_disk_rows() {
@@ -537,4 +678,5 @@ physical_disk_rows() {
             "$smart_health" "$smart_wear" "$smart_err_label" "$smart_err_count"
     done < <(LC_ALL=C lsblk -dn -b -o NAME,SIZE,ROTA,TYPE,MODEL 2>/dev/null)
 }
+
 
