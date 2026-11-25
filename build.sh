@@ -27,9 +27,10 @@ mkdir -p -- "$OUTPUT_DIR"
 tmp=$(mktemp "$OUTPUT_DIR/.report-build.XXXXXX")
 trap 'rm -f -- "$tmp"' EXIT HUP INT TERM
 
-# 片段级 disable 只服务于编辑器的单文件检查；合并产物必须保留完整检查，
-# 否则 report.sh 里的真实未使用变量和未定义变量也会被静音。
-grep -h -v -E '^# shellcheck disable=SC(2034|2154)(,SC(2034|2154))?$' \
+# src 里每个片段都带自己的 shellcheck 指令（shell=bash、片段级 disable），
+# 这些只服务于编辑器单文件检查。合并产物有 shebang，也不该被片段级
+# disable 静音，所以构建时统一删掉，保留完整检查。
+grep -h -v -E '^# shellcheck ' \
     "${sources[@]}" |
     sed \
         -e "s/^# Date    : BUILD_TIME$/# Date    : $BUILD_DATE/" \

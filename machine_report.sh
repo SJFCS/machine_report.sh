@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# shellcheck shell=bash
 # -*- coding: utf-8 -*-
 # ============================================================
 # File    : machine_report.sh
@@ -275,7 +274,6 @@ if [ -n "${FORCE_COLOR:-}" ] || { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }; then
     C_MUTED=$'\033[90m'
 fi
 
-# shellcheck shell=bash
 # ── 显示宽度引擎 ───────────────────────────────────────────────────────
 #
 # 这段 Perl 从标准输入读取 UTF-8 字符串，由 TABLE_MODE 决定行为：
@@ -789,7 +787,6 @@ max_tsv_column_width() {
     printf '%s' "$max"
 }
 
-# shellcheck shell=bash
 # ── [FORMAT] 无外部进程的数值基础函数 ─────────────────────────────────
 #
 # 采集阶段早于 40-format.sh 执行，因此这些最底层的定点换算单独放在这里。
@@ -900,7 +897,6 @@ _mhz_to_ghz_into() {
     printf -v decimal '%d.%03d' "$whole" "$remainder"
     printf -v "$__var" '%.2f' "$decimal"
 }
-# shellcheck shell=bash
 # ── [FORMAT] 通用数值与百分比 ──────────────────────────────────────────
 
 # [FORMAT] is_number VALUE -> 是否为可安全交给 printf/算术的十进制数值。
@@ -1059,7 +1055,6 @@ format_mib_as_gib() {
     printf '%s' '-'
 }
 
-# shellcheck shell=bash
 #
 # [FORMAT] align_row_ends LEFT RIGHT [WIDTH] -> 两端对齐到一行。
 # 两侧都可以带 ANSI；省略 WIDTH 时使用当前 DATA_W。
@@ -1149,7 +1144,6 @@ color_kv_segments() {
     printf '%s' "$out"
 }
 
-# shellcheck shell=bash
 #
 # ── handler 公开 API ───────────────────────────────────────────────────
 #
@@ -1254,7 +1248,6 @@ mr_percent_bar() {
     percent_bar_display "${1-}" "${2-}" "${3-}"
 }
 
-# shellcheck shell=bash
 # ── [TABLE] 布局测量 ───────────────────────────────────────────────────
 
 # [TABLE] measure_fields -> 根据 FIELD_LABELS/FIELD_VALUES 计算 NAME_W/DATA_W。
@@ -1650,7 +1643,6 @@ stacked_bar() {
     return "$rc"
 }
 
-# shellcheck shell=bash
 #
 # ── [CORE] 最终渲染 ────────────────────────────────────────────────────
 
@@ -1714,7 +1706,6 @@ render_report() {
     print_merged_divider "$BOTTOM_LEFT" "$BOTTOM_RIGHT"
 }
 
-# shellcheck shell=bash
 # ── [HANDLER / MOCK] GPU ───────────────────────────────────────────────
 
 # [MOCK] demo_gpu_rows -> 两块 A100 的 GPU 演示 TSV。
@@ -2396,7 +2387,6 @@ physical_disk_rows() {
 }
 
 
-# shellcheck shell=bash
 #
 # ── 平台与 DMI 探测 ────────────────────────────────────────────────────
 
@@ -2669,7 +2659,6 @@ collect_dns_servers() {
     '
 }
 
-# shellcheck shell=bash
 #
 # ── 数据源开关与宿主机基础信息 ────────────────────────────────────────
 #
@@ -2960,7 +2949,6 @@ collect_real_scalars() {
 }
 
 
-# shellcheck shell=bash
 #
 # ── 封面与页脚 ─────────────────────────────────────────────────────────
 #
@@ -2984,7 +2972,6 @@ REPORT_ENVIRONMENT=${REPORT_ENVIRONMENT-'PRODUCTION'}
 # 页脚：ENVIRONMENT 固定在前，SERVER/CLIENT 由 20-network.sh 追加。
 [ -n "${REPORT_ENVIRONMENT:-}" ] &&
     mr_footer_line "${C_ENV}ENVIRONMENT · ${REPORT_ENVIRONMENT}${C_RESET}"
-# shellcheck shell=bash
 #
 # ── [HANDLER] 身份与系统基本信息 ───────────────────────────────────────
 #
@@ -3009,7 +2996,6 @@ handler_identity() {
 }
 
 mr_register identity
-# shellcheck shell=bash
 #
 # ── [HANDLER] DNS 与网卡 ───────────────────────────────────────────────
 #
@@ -3042,7 +3028,6 @@ handler_network() {
 }
 
 mr_register network
-# shellcheck shell=bash
 #
 # ── [HANDLER] CPU 与负载 ───────────────────────────────────────────────
 #
@@ -3082,7 +3067,6 @@ handler_compute_fill() {
 }
 
 mr_register compute
-# shellcheck shell=bash
 #
 # ── [HANDLER] GPU ──────────────────────────────────────────────────────
 #
@@ -3155,7 +3139,6 @@ handler_gpu_fill() {
 }
 
 mr_register gpu
-# shellcheck shell=bash
 #
 # ── [HANDLER] 内存 ─────────────────────────────────────────────────────
 #
@@ -3282,7 +3265,6 @@ handler_memory_fill() {
 }
 
 mr_register memory
-# shellcheck shell=bash
 #
 # ── [HANDLER] 磁盘 ─────────────────────────────────────────────────────
 #
@@ -3461,7 +3443,6 @@ handler_disk_fill() {
 }
 
 mr_register disk
-# shellcheck shell=bash
 #
 # ── 执行入口 ───────────────────────────────────────────────────────────
 #

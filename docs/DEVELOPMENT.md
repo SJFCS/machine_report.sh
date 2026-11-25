@@ -58,8 +58,8 @@ render_report()               # 画边框、居中、输出
 - `build.sh` 里的 `VERSION` 是唯一版本号来源；构建时写入产物头部。
 - `Date` 使用构建当天日期。
 - 合并后会跑一次 `bash -n`，语法错误直接失败，不会写出半成品。
-- 单文件里的 `# shellcheck disable=SC2034` / `SC2154` 只服务编辑器检查，
-  合并时会被剔除，保证产物仍按完整规则检查。
+- `src/` 里的 `# shellcheck shell=bash`、片段级 `disable=SC2034/SC2154`
+  只服务编辑器单文件检查，合并时统一删除；产物按完整规则检查。
 
 改了 `src/` 之后一定要重新 `./build.sh` 并把 `machine_report.sh` 一起提交，
 `install.sh` 安装的是构建产物，不是 `src/`。
