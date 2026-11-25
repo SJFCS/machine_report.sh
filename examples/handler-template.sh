@@ -8,22 +8,22 @@
 #
 # 只要不调用框架内部函数，这里出现的就是全部 API。
 # 想改标题/页脚而不加字段，见 src/handlers/00-cover.sh。
+#
+# 本文件绘制的行：EXAMPLE / EXAMPLE 2 / EXAMPLE BAR
 
-# 第一个钩子：采集数据并添加字段。
 handler_mything() {
-    # 新分组的第一行：mr_field_break 会在上方画一条实线；
-    # 只想接在上一组里则用 mr_field '标签' '值'
+    # 新分组的第一行：实线分隔
     mr_field_break 'EXAMPLE' 'hello'
 
-    # 新分组：mr_field_break 会在上方画一条实线
-    mr_field_break 'LAST BOOT' "$(date '+%Y-%m-%d %H:%M')"
+    # 同一组的后续条目：虚线分隔
+    mr_field_dashed 'EXAMPLE 2' "$(date '+%Y-%m-%d %H:%M:%S')"
 
     # 依赖列宽的行：先占位并记住行号
     mr_field 'EXAMPLE BAR' ''
     EXAMPLE_BAR_ROW=$FIELD_INDEX
 }
 
-# 第二个钩子（可选）：列宽确定后回填。此时 DATA_W 可用。
+# 可选钩子：列宽确定后回填。此时 DATA_W 可用。
 handler_mything_fill() {
     mr_update "$EXAMPLE_BAR_ROW" "$(mr_bar 42 100)"
 }

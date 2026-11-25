@@ -80,35 +80,172 @@ render_report()                                       # 画边框、居中、输
 
 ## 快速开始：加一个 handler
 
-1. 新建 `src/handlers/70-mything.sh`
+新建 `src/handlers/70-mything.sh`：
 
-  ```bash
-  # shellcheck shell=bash
-  #
-  # 本文件绘制的行：EXAMPLE / EXAMPLE BAR
+```bash
+# shellcheck shell=bash
+#
+# 本文件绘制的行：EXAMPLE / EXAMPLE BAR
 
-  handler_mything() {
-      # 新分组的第一行用 mr_field_break；如果只想接在上一组里则用 mr_field
-      mr_field_break 'EXAMPLE' 'hello'
+handler_mything() {
+    mr_field_break 'EXAMPLE' 'hello'   # 实线：从这里开始新的一组
 
-      mr_field 'EXAMPLE BAR' ''
-      MY_BAR_ROW=$FIELD_INDEX      # 先占位，等列宽确定
-  }
+    mr_field 'EXAMPLE BAR' ''
+    MY_BAR_ROW=$FIELD_INDEX            # 先占位，等列宽确定
+}
 
-  handler_mything_fill() {
-      mr_update "$MY_BAR_ROW" "$(mr_bar 42 100)"
-  }
+handler_mything_fill() {
+    mr_update "$MY_BAR_ROW" "$(mr_bar 42 100)"
+}
 
-  mr_register mything
-  ```
+mr_register mything
+```
 
-2. `./build.sh`
+然后 `./build.sh`，报告末尾会出现：
 
-3. 新的分组会自动出现在磁盘之后（文件顺序即注册顺序）。
-   不想显示某一行：注释掉对应的 `mr_field`。
-   不想显示整组：注释掉文件末尾的 `mr_register`。
+```text
+├───────────────┼─────────────────────────────────┤
+│ EXAMPLE       │ hello                           │
+│ EXAMPLE BAR   │ ████████████████░░░░░░░░░░░░░░░ │
+├───────────────┴─────────────────────────────────┤
+│                    ENVIRONMENT · PRODUCTION     │
+```
+
+- 文件顺序决定位置：`70-` 排在磁盘之后；想放中间就改名，例如 `25-mything.sh`。
+- 不想显示某一行：注释掉对应的 `mr_field`。
+- 不想显示整组：注释掉文件末尾的 `mr_register`。
 
 也可以直接复制 `examples/handler-template.sh` 改名使用。
+
+## 例子
+
+### 1. 独立区块：第一条用实线
+
+```bash
+handler_backup() {
+    mr_field_break 'BACKUP' 'rsync · nightly'
+    mr_field 'LAST RUN' '2026-11-25 03:00'
+}
+
+mr_register backup
+```
+
+效果：
+
+```text
+├───────────────┼──────────────────┤
+│ BACKUP        │ rsync · nightly  │
+│ LAST RUN      │ 2026-11-25 03:00 │
+```
+
+### 2. 接在别人的区块里：不画线
+
+```bash
+handler_misc() {
+    mr_field 'SHELL' "${SHELL##*/}"
+    mr_field 'TERM' "${TERM:-unknown}"
+}
+
+mr_register misc
+```
+
+第一行用 `mr_field`（`BREAK` 默认 0），所以直接接在上一组末尾，
+不会出现分隔线。适合给自己加几行补充信息。
+
+### 3. 一组多条目：条目之间用虚线
+
+像磁盘那样“每块盘一组”，第一条实线、后面条条虚线：
+
+```bash
+handler_ports() {
+    local line first=1
+    while IFS=$'\t' read -r name state; do
+        if (( first )); then
+            mr_field_break "PORT $name" "$state"
+            first=0
+        else
+            mr_field_dashed "PORT $name" "$state"
+        fi
+    done < <(printf '22\tlisten\n80\tlisten\n443\tlisten\n')
+}
+
+mr_register ports
+```
+
+效果：
+
+```text
+│ PORT 22        │ listen │
+├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┼┄┄┄┄┄┄┄┄┤
+│ PORT 80        │ listen │
+├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┼┄┄┄┄┄┄┄┄┤
+│ PORT 443       │ listen │
+```
+
+`mr_field 'LABEL' 'VALUE' 2` 和 `mr_field_dashed 'LABEL' 'VALUE'` 完全等价。
+
+### 4. 条形图 / 百分比：占位 + 回填
+
+列宽要等所有行加完才知道，所以依赖 `DATA_W` 的内容分两步：
+
+```bash
+handler_diskfree() {
+    mr_field_break 'DISK FREE' ''
+    DISK_FREE_ROW=$FIELD_INDEX
+}
+
+handler_diskfree_fill() {
+    local free=58 total=100
+    mr_update "$DISK_FREE_ROW" "$(mr_bar "$free" "$total")"          # 占满 DATA_W
+    # 也可以固定宽度：mr_bar "$free" "$total" 20
+}
+
+mr_register diskfree
+```
+
+百分比条 + 右侧百分比文字：
+
+```bash
+handler_diskfree_fill() {
+    mr_update "$DISK_FREE_ROW" "$(mr_percent_bar 58 100 58.0)"
+}
+```
+
+### 5. 完全自定义：命令、颜色、截断
+
+```bash
+handler_extras() {
+    local uptime_text
+    uptime_text=$(uptime 2>/dev/null)
+
+    mr_field_break 'UPTIME RAW' "$(mr_fit "$uptime_text" 40)"
+    mr_field 'STATUS' "${C_OK}OK${C_RESET}"
+    mr_field 'WIDTH' "1 个中文 = $(mr_width 中) 列"
+}
+
+mr_register extras
+```
+
+- `mr_fit` 按**显示宽度**截断（中文算 2 列），超宽补 `…`。
+- `${C_OK}` / `${C_RESET}` 是现成颜色，见 `core/00-bootstrap.sh`。
+- 想右补空格对齐，用 `mr_pad 'text' 20`。
+
+### 6. 只想改样式，不想加行
+
+- 分隔线视觉：`mr_field`（无线）↔ `mr_field_break`（实线）↔ `mr_field_dashed`（虚线）
+- 抬头/页脚：`src/handlers/00-cover.sh`，注释一行就隐藏一行
+- 颜色：`src/core/00-bootstrap.sh` 的 `C_*`
+- 列宽上下限：`src/core/00-bootstrap.sh` 的 `NAME_MIN/MAX`、`DATA_MIN/MAX`
+
+### 分隔线速查
+
+| 写法 | 效果 | 场景 |
+| --- | --- | --- |
+| `mr_field 'A' 'v'` | 无分隔线 | 接在上一组里 |
+| `mr_field_break 'A' 'v'` | 上方实线 | 新的一组 |
+| `mr_field_dashed 'A' 'v'` | 上方虚线 | 同一组里的下一条 |
+| `mr_field 'A' 'v' 1` | 同 `mr_field_break` | 少写一行时用 |
+| `mr_field 'A' 'v' 2` | 同 `mr_field_dashed` | 少写一行时用 |
 
 ## handler 契约
 
