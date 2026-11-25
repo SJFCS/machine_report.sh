@@ -2,6 +2,8 @@
 
 `machine_report.sh` 是由 `src/` 下的源码片段合并生成的单文件脚本，请勿
 直接修改生成文件。
+![1795594924591](image/README/1795594924591.png)
+![1795594938908](image/README/1795594938908.png)
 
 ## 依赖
 
@@ -139,8 +141,8 @@ curl -fsSL https://raw.githubusercontent.com/SJFCS/machine_report.sh/main/instal
 
 | shell | 当前用户安装 | root 系统安装 |
 | ----- | ------------ | ------------- |
-| bash  | `~/.bashrc`（交互式），以及 `~/.bash_profile`、`~/.bash_login`、`~/.profile` 中 bash 登录时实际读取的第一个文件 | `/etc/profile` |
-| zsh   | `~/.zshrc`（交互式，登录 zsh 也会读取） | 已有的 `/etc/zprofile` 或 `/etc/zsh/zprofile` |
+| bash | `~/.bashrc`（交互式），以及 `~/.bash_profile`、`~/.bash_login`、`~/.profile` 中 bash 登录时实际读取的第一个文件 | `/etc/profile` |
+| zsh | `~/.zshrc`（交互式，登录 zsh 也会读取） | 已有的 `/etc/zprofile` 或 `/etc/zsh/zprofile` |
 
 当前用户安装会在每次打开交互式 bash/zsh 时自动展示一次报告；root 系统
 安装会在登录时自动展示。临时关闭自动展示可设置 `MREPORT_AUTORUN=0`；
