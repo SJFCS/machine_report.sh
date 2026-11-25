@@ -262,21 +262,69 @@ GPU 数据继续。可用 `REPORT_GPU_TIMEOUT` 调整秒数，设为 `0` 可取�
 
 ## 源码结构
 
-- `00-header.sh`：脚本说明、运行参数、颜色与边框常量
-- `10-display-width.sh`：Unicode/ANSI 显示宽度计算与截断
-- `15-format-core.sh`：无外部进程的定点数值与比例换算
-- `20-system-collect.sh`：mock 数据与系统基础指标采集
-- `30-platform-collect.sh`：平台、身份、Locale 与网卡采集
-- `40-format.sh`：通用数值格式化
-- `50-gpu-disk.sh`：GPU 与磁盘数据采集和格式化
-- `60-memory-table.sh`：内存指标格式化与字段注册
-- `70-report-fields.sh`：报告字段组装
-- `80-layout.sh`：列宽、边框与条形图布局
-- `90-render.sh`：动态值回填与最终渲染
+- `src/core/`：框架内核，平时不需要改
+  - `00-bootstrap.sh`：脚本说明、运行参数、颜色与边框常量
+  - `10-text.sh`：Unicode/ANSI 显示宽度、截断与补齐
+  - `20-numbers.sh`：无外部进程的定点数值与比例换算
+  - `30-format.sh`：通用数值、容量与百分比格式化
+  - `40-table.sh`：字段注册（`add_field`）、两端对齐与着色
+  - `45-api.sh`：面向 handler 的 `mr_*` API
+  - `50-layout.sh`：列宽、边框与条形图布局
+  - `60-render.sh`：最终渲染
+- `src/sources/`：纯数据采集，只输出文本或 TSV
+  - `system.sh`：mock 数据与 OS/CPU/负载/内存
+  - `platform.sh`：平台、身份、Locale 与网卡
+  - `gpu-disk.sh`：GPU 与磁盘（含 SMART）
+- `src/handlers/`：展示层，一个文件一个 handler
+  - `10-identity.sh`、`20-network.sh`、`30-compute.sh`、
+    `40-gpu.sh`、`50-memory.sh`、`60-disk.sh`
+- `src/main.sh`：采集 → 运行 handler → 测量列宽 → 回填 → 渲染
+- `build.sh`：按 core → sources → handlers → main 的顺序合并成
+  `machine_report.sh`
 
 数值换算优先使用 Bash 内建定点运算；只有无法用整数精度安全表达或需要
 解析整段文本时才回退到 awk。标题、页脚和字段行合并为一次 Perl 渲染，
 避免按单元格或按行启动解释器。
+
+## 自定义 handler
+
+获取数据、排版都只写在一个文件里，不需要读框架代码：
+
+```bash
+# src/handlers/70-mything.sh
+handler_mything() {
+    mr_field_break 'LAST BOOT' "$(date '+%Y-%m-%d %H:%M')"
+    mr_field 'DISK TEMP' ''
+    TEMP_ROW=$FIELD_INDEX          # 先占位，等列宽确定后再回填
+}
+
+handler_mything_fill() {
+    mr_update "$TEMP_ROW" "$(mr_bar 42 100)"
+}
+
+mr_register mything
+```
+
+执行 `./build.sh` 后自动生效，`mr_register` 的顺序就是渲染顺序。
+需要采集数据时直接调用 `src/sources/` 里的 `collect_*` / `detect_*`，
+或者自己写命令。
+
+`mr_*` 一览：
+
+| 函数 | 作用 |
+| --- | --- |
+| `mr_field LABEL VALUE [BREAK]` | 添加一行；`BREAK` 0 无分隔线、1 实线、2 虚线 |
+| `mr_field_break` / `mr_field_dashed` | 添加一行并画实线 / 虚线 |
+| `mr_update INDEX VALUE` | 列宽确定后回填某一行的值 |
+| `mr_width` / `mr_pad` / `mr_fit` | 显示宽度、右补空格、超宽截断 |
+| `mr_bar VALUE TOTAL [WIDTH]` | 无颜色百分比条，省略宽度时用 `DATA_W` |
+| `mr_percent_bar VALUE TOTAL PERCENT` | 百分比条 + 右侧百分比文本 |
+
+可选钩子：
+
+- `handler_xxx_measure()`：列宽测量后调用，用于把 `DATA_W` 撑宽（很少用）
+- `handler_xxx_fill()`：一行数据都排好后调用，此时 `DATA_W` 已知，
+  适合回填条形图、百分比这类依赖宽度的值
 
 ## 常用变量
 

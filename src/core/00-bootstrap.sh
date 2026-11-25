@@ -19,19 +19,32 @@
 #   3. ANSI CSI/OSC 序列占 0 列；私有区字符（Nerd Font）按 1 列处理。
 #   4. 单元格只支持单行。超宽内容显示“…”并保留原始数据，不会撑破边框。
 #
-# ── 怎样增加字段 ────────────────────────────────────────────────────────
-# 按显示顺序调用 add_field 即可，三个底层数组会由函数自动同步：
-#   add_field '字段名' '字段值' [分隔线样式]
+# ── 代码分层 ────────────────────────────────────────────────────────────
 #
-# 第三个参数省略或为 0 时不画分隔线；1 为实线，2 为虚线。
-# 字段值可以含中文、ANSI 颜色和 Nerd Font 图标。
+#   src/core/      框架内核：宽度、数字、表格、布局、渲染、mr_* API
+#   src/sources/   纯数据采集：只输出文本或 TSV，不画边框、不加颜色
+#   src/handlers/  UI 逻辑：一个文件一个 handler，用 mr_* 排版
+#   src/main.sh    执行入口：采集 → 依次运行 handler → 测量 → 回填 → 渲染
 #
-# 例如在 UPTIME 后面增加一行，并开启一个新分组：
-#   add_field 'LAST BOOT' "$(date '+%Y-%m-%d %H:%M')" 1
+# 想加自己的内容，不用看内核，只写一个 handler：
+#   1. 在 src/handlers/ 下新建 70-mything.sh
+#   2. 定义 handler_mything()，调用 mr_field 追加行
+#   3. 文件末尾写 mr_register mything
+#   4. ./build.sh
 #
-# 字段名和数据列都会自动测量；NAME_W 与 DATA_W 再由上下限夹住。
-# 如果新增的字段名比现有列宽更长，可以调整 NAME_MIN / NAME_MAX；如果数据
-# 普遍更长，可以调整 DATA_MIN / DATA_MAX。无需修改任何画线函数。
+# mr_ 开头的函数是对外 API（实现见 core/45-api.sh），其余函数都是内部实现。
+# 字段名和数据列会自动测量；NAME_W / DATA_W 再由上下限夹住。
+#
+# 依赖列宽的行（条形图、百分比）先占位，等测量完再回填：
+#   handler_mything() {
+#       mr_field_break 'LAST BOOT' "$(date '+%Y-%m-%d %H:%M')"
+#       mr_field 'DISK TEMP' ''
+#       TEMP_ROW=$FIELD_INDEX
+#   }
+#   handler_mything_fill() {
+#       mr_update "$TEMP_ROW" "$(mr_bar 42 100)"
+#   }
+#   mr_register mything
 #
 # 依赖：Bash、awk、Perl 5。适用于 macOS/Linux。
 # 颜色：终端里自动启用；设置 NO_COLOR=1 可关闭，FORCE_COLOR=1 可强制启用。
@@ -44,7 +57,7 @@
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
 #       REPORT_MOCK 作为兼容别名，外部传入 REPORT_MOCK_ENABLED 时优先。
 #
-# ── 代码分层与函数索引 ──────────────────────────────────────────────────
+# ── 函数索引（内核开发用） ──────────────────────────────────────────────
 #
 # [MOCK] 演示数据（只影响展示，不负责采集）
 #   load_mock_scalars      OS/CPU/负载/内存等固定标量
@@ -52,7 +65,7 @@
 #   demo_disk_rows         无 lsblk 时的多磁盘示例
 #   用法：仅当 REPORT_MOCK_ENABLED=1 时调用；保持变量/TSV 格式不变。
 #
-# [HANDLER] 实际数据采集（输出纯文本或 TSV，不负责边框、颜色和截断）
+# [SOURCE] 实际数据采集（输出纯文本或 TSV，不负责边框、颜色和截断）
 #   collect_real_scalars   OS/CPU/负载/内存/运行时间等真实标量
 #   dmi_field / darwin_field
 #   detect_manufacturer / detect_product_name / detect_virtualization
@@ -86,9 +99,9 @@
 #   用法：add_field 'LABEL' 'VALUE'；measure_fields；render_report。
 #   TABLE 层只消费已完成的数据，不应调用 lsblk、nvidia-smi 或 dmidecode。
 #
-# [REPORT] 字段组装与输出
-#   本文件后半段按最终显示顺序调用 add_field，再执行 measure_fields，
-#   最后填充动态条形图并渲染。新增业务项时应先定义 handler，再组装字段。
+# [HANDLER] 展示层
+#   每个 handlers/*.sh 定义 handler_xxx（必需）、handler_xxx_measure
+#   （可选）和 handler_xxx_fill（可选），用 mr_field / mr_update 排版。
 
 set -u
 # REPORT_MOCK_ENABLED=1

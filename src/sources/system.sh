@@ -159,23 +159,23 @@ collect_cpu_scalars() {
 
 # [HANDLER] collect_load_averages -> load1/load5/load15。
 collect_load_averages() {
-    local values=''
+    local load_raw=''
     local -a load_values=()
     if [ "$platform_name" = Darwin ]; then
-        values=$(sysctl -n vm.loadavg 2>/dev/null)
+        load_raw=$(sysctl -n vm.loadavg 2>/dev/null)
     elif [ -r /proc/loadavg ]; then
-        read -r load1 load5 load15 values < /proc/loadavg || true
+        read -r load1 load5 load15 load_raw < /proc/loadavg || true
         [ -n "${load1:-}" ] && [ -n "${load5:-}" ] && [ -n "${load15:-}" ] &&
             return
     fi
-    if [ -z "$values" ]; then
-        values=$(uptime 2>/dev/null |
+    if [ -z "$load_raw" ]; then
+        load_raw=$(uptime 2>/dev/null |
             sed -E 's/.*load averages?:[[:space:]]*//')
     fi
-    values=${values//\{/}
-    values=${values//\}/}
-    values=${values//,/}
-    read -r -a load_values <<<"$values"
+    load_raw=${load_raw//\{/}
+    load_raw=${load_raw//\}/}
+    load_raw=${load_raw//,/}
+    read -r -a load_values <<<"$load_raw"
     load1=${load_values[0]:-0.00}
     load5=${load_values[1]:-0.00}
     load15=${load_values[2]:-0.00}
@@ -289,27 +289,4 @@ collect_real_scalars() {
     _profile_end
 }
 
-if (( REPORT_MOCK_ENABLED == 1 )); then
-    _profile_begin 'mock scalars'
-    load_mock_scalars
-    _profile_end
-else
-    collect_real_scalars
-fi
-
-# 内核版本始终使用真实值；mock 只影响上方演示指标。
-_profile_begin 'metadata'
-kernel_version=$(uname -r 2>/dev/null)
-[ -n "$kernel_version" ] || kernel_version=unknown
-kernel_summary="${platform_name} ${kernel_version} · ${server_arch}"
-
-# 主机名
-hostname=$(hostname 2>/dev/null)
-[ -n "$hostname" ] || hostname='unknown'
-full_hostname=$(hostname -f 2>/dev/null)
-[ -n "$full_hostname" ] || full_hostname='unknown'
-
-cpu_model_width=$(max_display_width "${cpu_models[@]}")
-cores="${cpu_cores} vCPU(s) / ${cpu_sockets} Socket(s)"
-_profile_end
 

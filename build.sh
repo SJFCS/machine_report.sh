@@ -8,8 +8,15 @@ OUTPUT=${1:-"$ROOT_DIR/machine_report.sh"}
 OUTPUT_DIR=$(dirname -- "$OUTPUT")
 BUILD_DATE=$(date '+%Y-%m-%d')
 
+# 构建顺序固定为：框架内核 → 数据源 → handlers → 入口。
+# 目录名和文件名都带排序，所以用 glob 展开即可保持稳定顺序。
 shopt -s nullglob
-sources=("$SRC_DIR"/*.sh)
+sources=(
+    "$SRC_DIR"/core/*.sh
+    "$SRC_DIR"/sources/*.sh
+    "$SRC_DIR"/handlers/*.sh
+    "$SRC_DIR"/main.sh
+)
 
 if (( ${#sources[@]} == 0 )); then
     printf 'No source files found in %s\n' "$SRC_DIR" >&2
