@@ -3,7 +3,7 @@
 # ============================================================
 # File    : machine_report.sh
 # Author  : song.jinfeng@outlook.com
-# Date    : 2026-11-25
+# Date    : 2026-11-26
 # Version : 0.1.1
 # Repo    : https://github.com/SJFCS/machine_report.sh.git
 # Desc    : It displays useful machine information right in the terminal session. 
@@ -53,7 +53,6 @@
 # SMART：需要 smartmontools 的 smartctl。REPORT_SMART_ENABLED=0 跳过采集；
 #        REPORT_SMART_TIMEOUT 控制单块磁盘超时秒数（默认 2，0 表示不限制）。
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
-#       REPORT_MOCK 作为兼容别名，外部传入 REPORT_MOCK_ENABLED 时优先。
 #
 # ── 函数索引（内核开发用） ──────────────────────────────────────────────
 #
@@ -64,6 +63,8 @@
 #   用法：仅当 REPORT_MOCK_ENABLED=1 时调用；保持变量/TSV 格式不变。
 #
 # [SOURCE] 实际数据采集（输出纯文本或 TSV，不负责边框、颜色和截断）
+#   collect_shared_scalars 汇总标量（mock/真实）与内核/主机名等元数据
+#   collect_platform_session 汇总厂商、型号、UUID、locale 与登录会话
 #   collect_real_scalars   OS/CPU/负载/内存/运行时间等真实标量
 #   dmi_field / darwin_field
 #   detect_manufacturer / detect_product_name / detect_virtualization
@@ -102,71 +103,39 @@
 #   （可选）和 handler_xxx_fill（可选），用 mr_field / mr_update 排版。
 
 set -u
-# REPORT_MOCK_ENABLED=1
-# REPORT_PROFILE=1
-# NO_COLOR=1
 
-# mock 默认关闭；兼容旧的 REPORT_MOCK 变量，并在入口处拒绝非法开关值。
-report_mock_setting=${REPORT_MOCK_ENABLED:-${REPORT_MOCK:-0}}
-case $report_mock_setting in
-    1|true|TRUE|yes|YES|on|ON) REPORT_MOCK_ENABLED=1 ;;
-    0|false|FALSE|no|NO|off|OFF) REPORT_MOCK_ENABLED=0 ;;
-    *)
-        printf '%s\n' \
-            "REPORT_MOCK_ENABLED/REPORT_MOCK 只能是 0/1（也支持 true/false/on/off）：$report_mock_setting" >&2
-        exit 2
-        ;;
-esac
+# 配置校验：把开关和超时统一规范化，非法值在采集开始前退出。
+_report_parse_bool() {
+    local name=$1 setting=$2
+    case $setting in
+        1|true|TRUE|yes|YES|on|ON) setting=1 ;;
+        0|false|FALSE|no|NO|off|OFF) setting=0 ;;
+        *)
+            printf '%s\n' \
+                "$name 只能是 0/1（也支持 true/false/on/off）：$setting" >&2
+            return 2
+            ;;
+    esac
+    printf -v "$name" '%s' "$setting"
+}
 
-report_profile_setting=${REPORT_PROFILE:-0}
-case $report_profile_setting in
-    1|true|TRUE|yes|YES|on|ON) REPORT_PROFILE=1 ;;
-    0|false|FALSE|no|NO|off|OFF) REPORT_PROFILE=0 ;;
-    *)
-        printf '%s\n' \
-            "REPORT_PROFILE 只能是 0/1（也支持 true/false/on/off）：$report_profile_setting" >&2
-        exit 2
-        ;;
-esac
+_report_parse_seconds() {
+    local name=$1 setting=$2
+    if ! [[ $setting =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$name 必须是非负整数秒：$setting" >&2
+        return 2
+    fi
+    printf -v "$name" '%s' "$((10#$setting))"
+}
 
-report_gpu_setting=${REPORT_GPU_ENABLED:-1}
-case $report_gpu_setting in
-    1|true|TRUE|yes|YES|on|ON) REPORT_GPU_ENABLED=1 ;;
-    0|false|FALSE|no|NO|off|OFF) REPORT_GPU_ENABLED=0 ;;
-    *)
-        printf '%s\n' \
-            "REPORT_GPU_ENABLED 只能是 0/1（也支持 true/false/on/off）：$report_gpu_setting" >&2
-        exit 2
-        ;;
-esac
+_report_parse_bool REPORT_MOCK_ENABLED "${REPORT_MOCK_ENABLED:-0}" || exit $?
+_report_parse_bool REPORT_PROFILE "${REPORT_PROFILE:-0}" || exit $?
+_report_parse_bool REPORT_GPU_ENABLED "${REPORT_GPU_ENABLED:-1}" || exit $?
+_report_parse_seconds REPORT_GPU_TIMEOUT "${REPORT_GPU_TIMEOUT:-1}" || exit $?
+_report_parse_bool REPORT_SMART_ENABLED "${REPORT_SMART_ENABLED:-1}" || exit $?
+_report_parse_seconds REPORT_SMART_TIMEOUT "${REPORT_SMART_TIMEOUT:-2}" || exit $?
 
-report_gpu_timeout=${REPORT_GPU_TIMEOUT:-1}
-if ! [[ $report_gpu_timeout =~ ^[0-9]+$ ]]; then
-    printf '%s\n' \
-        "REPORT_GPU_TIMEOUT 必须是非负整数秒：$report_gpu_timeout" >&2
-    exit 2
-fi
-REPORT_GPU_TIMEOUT=$((10#$report_gpu_timeout))
-
-report_smart_setting=${REPORT_SMART_ENABLED:-1}
-case $report_smart_setting in
-    1|true|TRUE|yes|YES|on|ON) REPORT_SMART_ENABLED=1 ;;
-    0|false|FALSE|no|NO|off|OFF) REPORT_SMART_ENABLED=0 ;;
-    *)
-        printf '%s\n' \
-            "REPORT_SMART_ENABLED 只能是 0/1（也支持 true/false/on/off）：$report_smart_setting" >&2
-        exit 2
-        ;;
-esac
-
-report_smart_timeout=${REPORT_SMART_TIMEOUT:-2}
-if ! [[ $report_smart_timeout =~ ^[0-9]+$ ]]; then
-    printf '%s\n' \
-        "REPORT_SMART_TIMEOUT 必须是非负整数秒：$report_smart_timeout" >&2
-    exit 2
-fi
-REPORT_SMART_TIMEOUT=$((10#$report_smart_timeout))
-
+# 计时器
 _profile_now_into() {
     local __var=$1 now=${EPOCHREALTIME:-}
     if [ -n "$now" ]; then
@@ -261,7 +230,7 @@ if [ -n "${FORCE_COLOR:-}" ] || { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }; then
     C_OK=$'\033[1;32m'
     C_WARN=$'\033[1;33m'
     C_CRIT=$'\033[1;31m'
-    C_BAR_USED=$'\033[1;34m'      # 已用内存用中性蓝色，不表达告警
+    C_BAR_USED=$'\033[1;34m'
     C_BAR_CACHE=$'\033[1;33m'
     C_BAR_FREE=$'\033[1;32m'
     C_BAR_AVAILABLE=$'\033[1;36m'
@@ -2659,6 +2628,27 @@ collect_dns_servers() {
     '
 }
 
+# [STAGE] collect_platform_session -> 厂商/型号/UUID 与 locale/时区/登录信息。
+collect_platform_session() {
+    _profile_begin 'platform'
+    if [ "$platform_name" = Darwin ]; then
+        # 厂商、型号和 UUID 都会读同一份 IOPlatformExpertDevice；先取一次，
+        # 后续 darwin_field 直接复用，避免每个字段都启动一次 ioreg。
+        DARWIN_PLATFORM_RAW=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null)
+    fi
+    server_manufacturer=$(detect_manufacturer)
+    server_product_name=$(detect_product_name)
+    virt_type=$(detect_virtualization)
+    system_uuid=$(detect_system_uuid)
+    _profile_end
+    _profile_begin 'session'
+    locale_name=$(detect_locale)
+    timezone_name=$(detect_timezone)
+    login_user=$(detect_login_user)
+    login_client=$(detect_login_client)
+    _profile_end
+}
+
 #
 # ── 数据源开关与宿主机基础信息 ────────────────────────────────────────
 #
@@ -2948,7 +2938,32 @@ collect_real_scalars() {
     _profile_end
 }
 
+# [STAGE] collect_shared_scalars -> 标量与元数据（OS/CPU/负载/运行时间/内存）。
+collect_shared_scalars() {
+    if (( REPORT_MOCK_ENABLED == 1 )); then
+        _profile_begin 'mock scalars'
+        load_mock_scalars
+        _profile_end
+    else
+        collect_real_scalars
+    fi
 
+    # 内核版本始终使用真实值；mock 只影响上方演示指标。
+    _profile_begin 'metadata'
+    kernel_version=$(uname -r 2>/dev/null)
+    [ -n "$kernel_version" ] || kernel_version=unknown
+    kernel_summary="${platform_name} ${kernel_version}"
+
+    # 主机名
+    hostname=$(hostname 2>/dev/null)
+    [ -n "$hostname" ] || hostname='unknown'
+    full_hostname=$(hostname -f 2>/dev/null)
+    [ -n "$full_hostname" ] || full_hostname='unknown'
+
+    cpu_model_width=$(max_display_width "${cpu_models[@]}")
+    cores="${cpu_cores} vCPU(s) / ${cpu_sockets} Socket(s)"
+    _profile_end
+}
 #
 # ── 封面与页脚 ─────────────────────────────────────────────────────────
 #
@@ -2960,7 +2975,7 @@ collect_real_scalars() {
 # 例如：REPORT_TITLE='我的机器' ./machine_report.sh
 
 # 用 ${VAR-default} 而不是 ${VAR:-default}：显式传空串也能把这一行关掉。
-REPORT_TITLE=${REPORT_TITLE-'服务器运行报告'}
+REPORT_TITLE=${REPORT_TITLE-'SERVER OPERATION REPORT'}
 REPORT_SUBTITLE=${REPORT_SUBTITLE-'PVE Platform'}
 REPORT_ENVIRONMENT=${REPORT_ENVIRONMENT-'PRODUCTION'}
 
@@ -2984,15 +2999,15 @@ REPORT_ENVIRONMENT=${REPORT_ENVIRONMENT-'PRODUCTION'}
 #   HOSTNAME（另起一组）
 
 handler_identity() {
-    mr_field   'OS'          "$os_name"
-    mr_field   'KERNEL'      "$kernel_summary"
-    mr_field   'VIRT'        "$virt_type"
-    mr_field   'LOCALE'      "$locale_name"
-    mr_field   'TIMEZONE'    "$timezone_name"
-    mr_field   'SERVER'      "${server_manufacturer} · ${server_product_name}"
-    mr_field   'SYSTEM UUID' "$system_uuid"
-    mr_field   'UPTIME'      "$uptime"
-    mr_field_break 'HOSTNAME' "$hostname"
+    mr_field        'SERVER'      "${server_manufacturer} · ${server_product_name}"
+    mr_field        'SYSTEM UUID' "$system_uuid"    
+    mr_field        'ARCH'        "${server_arch}"    
+    mr_field        'VIRT'        "$virt_type"
+    mr_field_break        'OS'          "$os_name"
+    mr_field        'KERNEL'      "$kernel_summary"    
+    mr_field        'LOCALE'      "$locale_name"
+    mr_field        'TIMEZONE'    "$timezone_name"
+    mr_field        'UPTIME'      "$uptime"
 }
 
 mr_register identity
@@ -3006,6 +3021,8 @@ mr_register identity
 # 本文件绘制的行：DNS / 每个网卡一行 NIC <名字> / 页脚 SERVER、CLIENT
 
 handler_network() {
+    mr_field_break 'HOSTNAME' "$hostname"
+
     local nic_name='' nic_ip='' primary_ip=''
 
     _profile_begin 'network'
@@ -3166,9 +3183,9 @@ memory_status_text() {
         fi
     fi
     case "$state" in
-        ok)   printf '%s●可用内存正常%s' "$C_OK" "$C_RESET" ;;
-        warn) printf '%s●可用内存偏紧%s' "$C_WARN" "$C_RESET" ;;
-        *)    printf '%s●可用内存危险%s' "$C_CRIT" "$C_RESET" ;;
+        ok)   printf '%s●MEM NORMAL%s' "$C_OK" "$C_RESET" ;;
+        warn) printf '%s●MEM WARNING%s' "$C_WARN" "$C_RESET" ;;
+        *)    printf '%s●MEM CRITICAL%s' "$C_CRIT" "$C_RESET" ;;
     esac
 }
 
@@ -3444,61 +3461,91 @@ handler_disk_fill() {
 
 mr_register disk
 #
+# 本文件绘制的行：EXAMPLE / EXAMPLE BAR
+
+handler_mything() {
+    mr_field_break 'EXAMPLE' 'hello'   # 实线：从这里开始新的一组
+
+    # 同一组的后续条目：虚线分隔
+    mr_field_dashed 'EXAMPLE 2' "$(date '+%Y-%m-%d %H:%M:%S')"
+
+    mr_field 'EXAMPLE BAR' ''
+    MY_BAR_ROW=$FIELD_INDEX            # 先占位，等列宽确定
+    
+    mr_field_break 'EXAMPLE' 'hello2'   # 实线：从这里开始新的一组
+
+}
+
+handler_mything_fill() {
+    mr_update "$MY_BAR_ROW" "$(mr_bar 42 100)"
+}
+
+mr_register mything
+
+
+
+handler_backup() {
+    mr_field_break 'BACKUP' 'rsync · nightly'
+    mr_field 'LAST RUN' '2026-11-25 03:00'
+}
+
+mr_register backup
+
+handler_misc() {
+    mr_field 'SHELL' "${SHELL##*/}"
+    mr_field 'TERM' "${TERM:-unknown}"
+}
+
+mr_register misc
+
+handler_ports() {
+    local line first=1
+    while IFS=$'\t' read -r name state; do
+        if (( first )); then
+            mr_field_break "PORT $name" "$state"
+            first=0
+        else
+            mr_field_dashed "PORT $name" "$state"
+        fi
+    done < <(printf '22\tlisten\n80\tlisten\n443\tlisten\n')
+}
+
+mr_register ports
+
+handler_diskfree() {
+    mr_field_break 'DISK FREE' ''
+    DISK_FREE_ROW=$FIELD_INDEX
+}
+
+handler_diskfree_fill() {
+    local free=58 total=100
+    mr_update "$DISK_FREE_ROW" "$(mr_bar "$free" "$total")"          # 占满 DATA_W
+    # mr_update "$DISK_FREE_ROW" "$(mr_percent_bar 58 100 58.0)"
+    # 也可以固定宽度：mr_bar "$free" "$total" 20
+}
+
+mr_register diskfree
+
+handler_extras() {
+    local uptime_text
+    uptime_text=$(uptime 2>/dev/null)
+
+    mr_field_break 'UPTIME RAW' "$(mr_fit "$uptime_text" 40)"
+    mr_field 'STATUS' "${C_OK}OK${C_RESET}"
+    mr_field 'WIDTH' "1 个中文 = $(mr_width 中) 列"
+}
+
+mr_register extras
+#
 # ── 执行入口 ───────────────────────────────────────────────────────────
+#
+# 本文件只负责阶段调度；共享数据与平台信息的采集实现位于 src/sources/。
 #
 # 想加自己的内容，不需要改这个文件：
 #   1. 在 src/handlers/ 下新建一个 .sh（照抄任意一个 handler）
 #   2. 里面定义 handler_<名字>()，用 mr_field / mr_bar 等 mr_ 函数排版
 #   3. 文件末尾写 mr_register <名字>
 # 注册顺序就是渲染顺序；文件名只决定注册顺序。
-
-# [STAGE] collect_shared_scalars -> 标量与元数据（OS/CPU/负载/运行时间/内存）。
-collect_shared_scalars() {
-    if (( REPORT_MOCK_ENABLED == 1 )); then
-        _profile_begin 'mock scalars'
-        load_mock_scalars
-        _profile_end
-    else
-        collect_real_scalars
-    fi
-
-    # 内核版本始终使用真实值；mock 只影响上方演示指标。
-    _profile_begin 'metadata'
-    kernel_version=$(uname -r 2>/dev/null)
-    [ -n "$kernel_version" ] || kernel_version=unknown
-    kernel_summary="${platform_name} ${kernel_version} · ${server_arch}"
-
-    # 主机名
-    hostname=$(hostname 2>/dev/null)
-    [ -n "$hostname" ] || hostname='unknown'
-    full_hostname=$(hostname -f 2>/dev/null)
-    [ -n "$full_hostname" ] || full_hostname='unknown'
-
-    cpu_model_width=$(max_display_width "${cpu_models[@]}")
-    cores="${cpu_cores} vCPU(s) / ${cpu_sockets} Socket(s)"
-    _profile_end
-}
-
-# [STAGE] collect_platform_session -> 厂商/型号/UUID 与 locale/时区/登录信息。
-collect_platform_session() {
-    _profile_begin 'platform'
-    if [ "$platform_name" = Darwin ]; then
-        # 厂商、型号和 UUID 都会读同一份 IOPlatformExpertDevice；先取一次，
-        # 后续 darwin_field 直接复用，避免每个字段都启动一次 ioreg。
-        DARWIN_PLATFORM_RAW=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null)
-    fi
-    server_manufacturer=$(detect_manufacturer)
-    server_product_name=$(detect_product_name)
-    virt_type=$(detect_virtualization)
-    system_uuid=$(detect_system_uuid)
-    _profile_end
-    _profile_begin 'session'
-    locale_name=$(detect_locale)
-    timezone_name=$(detect_timezone)
-    login_user=$(detect_login_user)
-    login_client=$(detect_login_client)
-    _profile_end
-}
 
 # 1) 采集共享数据
 collect_shared_scalars

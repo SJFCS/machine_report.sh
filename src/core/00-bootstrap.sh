@@ -55,7 +55,6 @@
 # SMART：需要 smartmontools 的 smartctl。REPORT_SMART_ENABLED=0 跳过采集；
 #        REPORT_SMART_TIMEOUT 控制单块磁盘超时秒数（默认 2，0 表示不限制）。
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
-#       REPORT_MOCK 作为兼容别名，外部传入 REPORT_MOCK_ENABLED 时优先。
 #
 # ── 函数索引（内核开发用） ──────────────────────────────────────────────
 #
@@ -66,6 +65,8 @@
 #   用法：仅当 REPORT_MOCK_ENABLED=1 时调用；保持变量/TSV 格式不变。
 #
 # [SOURCE] 实际数据采集（输出纯文本或 TSV，不负责边框、颜色和截断）
+#   collect_shared_scalars 汇总标量（mock/真实）与内核/主机名等元数据
+#   collect_platform_session 汇总厂商、型号、UUID、locale 与登录会话
 #   collect_real_scalars   OS/CPU/负载/内存/运行时间等真实标量
 #   dmi_field / darwin_field
 #   detect_manufacturer / detect_product_name / detect_virtualization
@@ -104,71 +105,39 @@
 #   （可选）和 handler_xxx_fill（可选），用 mr_field / mr_update 排版。
 
 set -u
-# REPORT_MOCK_ENABLED=1
-# REPORT_PROFILE=1
-# NO_COLOR=1
 
-# mock 默认关闭；兼容旧的 REPORT_MOCK 变量，并在入口处拒绝非法开关值。
-report_mock_setting=${REPORT_MOCK_ENABLED:-${REPORT_MOCK:-0}}
-case $report_mock_setting in
-    1|true|TRUE|yes|YES|on|ON) REPORT_MOCK_ENABLED=1 ;;
-    0|false|FALSE|no|NO|off|OFF) REPORT_MOCK_ENABLED=0 ;;
-    *)
-        printf '%s\n' \
-            "REPORT_MOCK_ENABLED/REPORT_MOCK 只能是 0/1（也支持 true/false/on/off）：$report_mock_setting" >&2
-        exit 2
-        ;;
-esac
+# 配置校验：把开关和超时统一规范化，非法值在采集开始前退出。
+_report_parse_bool() {
+    local name=$1 setting=$2
+    case $setting in
+        1|true|TRUE|yes|YES|on|ON) setting=1 ;;
+        0|false|FALSE|no|NO|off|OFF) setting=0 ;;
+        *)
+            printf '%s\n' \
+                "$name 只能是 0/1（也支持 true/false/on/off）：$setting" >&2
+            return 2
+            ;;
+    esac
+    printf -v "$name" '%s' "$setting"
+}
 
-report_profile_setting=${REPORT_PROFILE:-0}
-case $report_profile_setting in
-    1|true|TRUE|yes|YES|on|ON) REPORT_PROFILE=1 ;;
-    0|false|FALSE|no|NO|off|OFF) REPORT_PROFILE=0 ;;
-    *)
-        printf '%s\n' \
-            "REPORT_PROFILE 只能是 0/1（也支持 true/false/on/off）：$report_profile_setting" >&2
-        exit 2
-        ;;
-esac
+_report_parse_seconds() {
+    local name=$1 setting=$2
+    if ! [[ $setting =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$name 必须是非负整数秒：$setting" >&2
+        return 2
+    fi
+    printf -v "$name" '%s' "$((10#$setting))"
+}
 
-report_gpu_setting=${REPORT_GPU_ENABLED:-1}
-case $report_gpu_setting in
-    1|true|TRUE|yes|YES|on|ON) REPORT_GPU_ENABLED=1 ;;
-    0|false|FALSE|no|NO|off|OFF) REPORT_GPU_ENABLED=0 ;;
-    *)
-        printf '%s\n' \
-            "REPORT_GPU_ENABLED 只能是 0/1（也支持 true/false/on/off）：$report_gpu_setting" >&2
-        exit 2
-        ;;
-esac
+_report_parse_bool REPORT_MOCK_ENABLED "${REPORT_MOCK_ENABLED:-0}" || exit $?
+_report_parse_bool REPORT_PROFILE "${REPORT_PROFILE:-0}" || exit $?
+_report_parse_bool REPORT_GPU_ENABLED "${REPORT_GPU_ENABLED:-1}" || exit $?
+_report_parse_seconds REPORT_GPU_TIMEOUT "${REPORT_GPU_TIMEOUT:-1}" || exit $?
+_report_parse_bool REPORT_SMART_ENABLED "${REPORT_SMART_ENABLED:-1}" || exit $?
+_report_parse_seconds REPORT_SMART_TIMEOUT "${REPORT_SMART_TIMEOUT:-2}" || exit $?
 
-report_gpu_timeout=${REPORT_GPU_TIMEOUT:-1}
-if ! [[ $report_gpu_timeout =~ ^[0-9]+$ ]]; then
-    printf '%s\n' \
-        "REPORT_GPU_TIMEOUT 必须是非负整数秒：$report_gpu_timeout" >&2
-    exit 2
-fi
-REPORT_GPU_TIMEOUT=$((10#$report_gpu_timeout))
-
-report_smart_setting=${REPORT_SMART_ENABLED:-1}
-case $report_smart_setting in
-    1|true|TRUE|yes|YES|on|ON) REPORT_SMART_ENABLED=1 ;;
-    0|false|FALSE|no|NO|off|OFF) REPORT_SMART_ENABLED=0 ;;
-    *)
-        printf '%s\n' \
-            "REPORT_SMART_ENABLED 只能是 0/1（也支持 true/false/on/off）：$report_smart_setting" >&2
-        exit 2
-        ;;
-esac
-
-report_smart_timeout=${REPORT_SMART_TIMEOUT:-2}
-if ! [[ $report_smart_timeout =~ ^[0-9]+$ ]]; then
-    printf '%s\n' \
-        "REPORT_SMART_TIMEOUT 必须是非负整数秒：$report_smart_timeout" >&2
-    exit 2
-fi
-REPORT_SMART_TIMEOUT=$((10#$report_smart_timeout))
-
+# 计时器
 _profile_now_into() {
     local __var=$1 now=${EPOCHREALTIME:-}
     if [ -n "$now" ]; then
@@ -263,7 +232,7 @@ if [ -n "${FORCE_COLOR:-}" ] || { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }; then
     C_OK=$'\033[1;32m'
     C_WARN=$'\033[1;33m'
     C_CRIT=$'\033[1;31m'
-    C_BAR_USED=$'\033[1;34m'      # 已用内存用中性蓝色，不表达告警
+    C_BAR_USED=$'\033[1;34m'
     C_BAR_CACHE=$'\033[1;33m'
     C_BAR_FREE=$'\033[1;32m'
     C_BAR_AVAILABLE=$'\033[1;36m'

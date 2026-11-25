@@ -289,4 +289,29 @@ collect_real_scalars() {
     _profile_end
 }
 
+# [STAGE] collect_shared_scalars -> 标量与元数据（OS/CPU/负载/运行时间/内存）。
+collect_shared_scalars() {
+    if (( REPORT_MOCK_ENABLED == 1 )); then
+        _profile_begin 'mock scalars'
+        load_mock_scalars
+        _profile_end
+    else
+        collect_real_scalars
+    fi
 
+    # 内核版本始终使用真实值；mock 只影响上方演示指标。
+    _profile_begin 'metadata'
+    kernel_version=$(uname -r 2>/dev/null)
+    [ -n "$kernel_version" ] || kernel_version=unknown
+    kernel_summary="${platform_name} ${kernel_version}"
+
+    # 主机名
+    hostname=$(hostname 2>/dev/null)
+    [ -n "$hostname" ] || hostname='unknown'
+    full_hostname=$(hostname -f 2>/dev/null)
+    [ -n "$full_hostname" ] || full_hostname='unknown'
+
+    cpu_model_width=$(max_display_width "${cpu_models[@]}")
+    cores="${cpu_cores} vCPU(s) / ${cpu_sockets} Socket(s)"
+    _profile_end
+}

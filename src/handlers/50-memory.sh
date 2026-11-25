@@ -26,9 +26,9 @@ memory_status_text() {
         fi
     fi
     case "$state" in
-        ok)   printf '%s●可用内存正常%s' "$C_OK" "$C_RESET" ;;
-        warn) printf '%s●可用内存偏紧%s' "$C_WARN" "$C_RESET" ;;
-        *)    printf '%s●可用内存危险%s' "$C_CRIT" "$C_RESET" ;;
+        ok)   printf '%s●MEM NORMAL%s' "$C_OK" "$C_RESET" ;;
+        warn) printf '%s●MEM WARNING%s' "$C_WARN" "$C_RESET" ;;
+        *)    printf '%s●MEM CRITICAL%s' "$C_CRIT" "$C_RESET" ;;
     esac
 }
 

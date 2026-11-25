@@ -9,6 +9,8 @@
 # 本文件绘制的行：DNS / 每个网卡一行 NIC <名字> / 页脚 SERVER、CLIENT
 
 handler_network() {
+    mr_field_break 'HOSTNAME' "$hostname"
+
     local nic_name='' nic_ip='' primary_ip=''
 
     _profile_begin 'network'

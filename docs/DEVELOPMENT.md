@@ -5,84 +5,6 @@
 
 ## 目录
 
-- [开发文档](#开发文档)
-  - [目录](#目录)
-  - [速查表](#速查表)
-  - [一分钟了解架构](#一分钟了解架构)
-  - [构建与产物](#构建与产物)
-  - [快速开始：加一个 handler](#快速开始加一个-handler)
-  - [例子](#例子)
-  - [handler 契约](#handler-契约)
-  - [公开 API](#公开-api)
-    - [字段](#字段)
-    - [标题与页脚](#标题与页脚)
-    - [文本工具](#文本工具)
-  - [数据流与生命周期](#数据流与生命周期)
-  - [常用全局量](#常用全局量)
-  - [改标题与页脚](#改标题与页脚)
-  - [数据源（sources）](#数据源sources)
-  - [编码约定](#编码约定)
-  - [常见坑](#常见坑)
-    - [1. `set -u` + bash 3.2 的空数组](#1-set--u--bash-32-的空数组)
-    - [2. `local` 是动态作用域](#2-local-是动态作用域)
-    - [3. 宽度和颜色](#3-宽度和颜色)
-    - [4. `REPORT_PROFILE=1` 在 bash 3.2 下会变慢](#4-report_profile1-在-bash-32-下会变慢)
-    - [5. mock 与真实数据](#5-mock-与真实数据)
-  - [性能](#性能)
-  - [测试与自检](#测试与自检)
-
-## 速查表
-
-### handler 骨架
-
-```bash
-handler_xxx()         { ... }                 # 必需：采集 + mr_field 加行
-handler_xxx_measure() { ... }                 # 可选：撑宽 DATA_W
-handler_xxx_fill()    { ... }                 # 可选：回填条形图/百分比
-mr_register xxx                               # 注册；顺序即渲染顺序
-```
-
-### 字段与封面
-
-| 函数 | 说明 |
-| --- | --- |
-| `mr_field LABEL VALUE [BREAK]` | 追加一行；`BREAK` 0/1/2 |
-| `mr_field_break LABEL VALUE` | 追加一行并在上方画实线 |
-| `mr_field_dashed LABEL VALUE` | 追加一行并在上方画虚线 |
-| `mr_update INDEX VALUE` | 回填第 `INDEX` 行（`$FIELD_INDEX`） |
-| `mr_cover_line TEXT` | 表格上方加一行居中文字 |
-| `mr_footer_line TEXT` | 表格下方加一行居中文字 |
-
-### 文本与图形
-
-| 函数 | 说明 |
-| --- | --- |
-| `mr_width TEXT` | 显示列数（中文/ANSI 安全） |
-| `mr_pad TEXT WIDTH` | 右补空格到指定显示宽度 |
-| `mr_fit TEXT WIDTH` | 超宽截断并以 `…` 结尾 |
-| `mr_bar VALUE TOTAL [WIDTH]` | 百分比条；省略 `WIDTH` 时用 `DATA_W` |
-| `mr_percent_bar VALUE TOTAL PERCENT` | 百分比条 + 右侧百分比文本 |
-
-### 分隔线
-
-| 写法 | 效果 | 场景 |
-| --- | --- | --- |
-| `mr_field 'A' 'v'` | 无分隔线 | 接在上一组里 |
-| `mr_field_break 'A' 'v'` | 上方实线 | 新的一组 |
-| `mr_field_dashed 'A' 'v'` | 上方虚线 | 同一组里的下一条 |
-| `mr_field 'A' 'v' 1` | 同 `mr_field_break` | 少写一行时用 |
-| `mr_field 'A' 'v' 2` | 同 `mr_field_dashed` | 少写一行时用 |
-
-### 常用命令
-
-```bash
-./build.sh                                  # 构建 ./machine_report.sh
-./build.sh /tmp/x.sh                        # 构建到临时路径（调试）
-REPORT_MOCK_ENABLED=1 ./machine_report.sh   # 演示数据，输出可复现
-REPORT_PROFILE=1 ./machine_report.sh >/dev/null   # 分阶段耗时（stderr）
-./install.sh --source ./machine_report.sh   # 安装到 ~/.local，注册 mreport
-```
-
 ## 一分钟了解架构
 
 ```md
@@ -132,6 +54,59 @@ render_report()                                       # 画边框、居中、输
 改了 `src/` 之后一定要重新 `./build.sh` 并把 `machine_report.sh` 一起提交，
 `install.sh` 安装的是构建产物，不是 `src/`。
 
+
+## 速查表
+
+### handler 骨架
+
+```bash
+handler_xxx()         { ... }                 # 必需：采集 + mr_field 加行
+handler_xxx_measure() { ... }                 # 可选：撑宽 DATA_W
+handler_xxx_fill()    { ... }                 # 可选：回填条形图/百分比
+mr_register xxx                               # 注册；顺序即渲染顺序
+```
+
+### 字段与封面
+
+| 函数                           | 说明                                |
+| ------------------------------ | ----------------------------------- |
+| `mr_field LABEL VALUE [BREAK]` | 追加一行；`BREAK` 0/1/2             |
+| `mr_field_break LABEL VALUE`   | 追加一行并在上方画实线              |
+| `mr_field_dashed LABEL VALUE`  | 追加一行并在上方画虚线              |
+| `mr_update INDEX VALUE`        | 回填第 `INDEX` 行（`$FIELD_INDEX`） |
+| `mr_cover_line TEXT`           | 表格上方加一行居中文字              |
+| `mr_footer_line TEXT`          | 表格下方加一行居中文字              |
+
+### 文本与图形
+
+| 函数                                 | 说明                                 |
+| ------------------------------------ | ------------------------------------ |
+| `mr_width TEXT`                      | 显示列数（中文/ANSI 安全）           |
+| `mr_pad TEXT WIDTH`                  | 右补空格到指定显示宽度               |
+| `mr_fit TEXT WIDTH`                  | 超宽截断并以 `…` 结尾                |
+| `mr_bar VALUE TOTAL [WIDTH]`         | 百分比条；省略 `WIDTH` 时用 `DATA_W` |
+| `mr_percent_bar VALUE TOTAL PERCENT` | 百分比条 + 右侧百分比文本            |
+
+### 分隔线
+
+| 写法                      | 效果                 | 场景             |
+| ------------------------- | -------------------- | ---------------- |
+| `mr_field 'A' 'v'`        | 无分隔线             | 接在上一组里     |
+| `mr_field_break 'A' 'v'`  | 上方实线             | 新的一组         |
+| `mr_field_dashed 'A' 'v'` | 上方虚线             | 同一组里的下一条 |
+| `mr_field 'A' 'v' 1`      | 同 `mr_field_break`  | 少写一行时用     |
+| `mr_field 'A' 'v' 2`      | 同 `mr_field_dashed` | 少写一行时用     |
+
+### 常用命令
+
+```bash
+./build.sh                                  # 构建 ./machine_report.sh
+./build.sh /tmp/x.sh                        # 构建到临时路径（调试）
+REPORT_MOCK_ENABLED=1 ./machine_report.sh   # 演示数据，输出可复现
+REPORT_PROFILE=1 ./machine_report.sh >/dev/null   # 分阶段耗时（stderr）
+./install.sh --source ./machine_report.sh   # 安装到 ~/.local，注册 mreport
+```
+
 ## 快速开始：加一个 handler
 
 新建 `src/handlers/70-mything.sh`：
@@ -162,14 +137,11 @@ mr_register mything
 │ EXAMPLE       │ hello                           │
 │ EXAMPLE BAR   │ ████████████████░░░░░░░░░░░░░░░ │
 ├───────────────┴─────────────────────────────────┤
-│                    ENVIRONMENT · PRODUCTION     │
 ```
 
 - 文件顺序决定位置：`70-` 排在磁盘之后；想放中间就改名，例如 `25-mything.sh`。
 - 不想显示某一行：注释掉对应的 `mr_field`。
 - 不想显示整组：注释掉文件末尾的 `mr_register`。
-
-也可以直接复制 `examples/handler-template.sh` 改名使用。
 
 ## 例子
 
@@ -229,11 +201,13 @@ mr_register ports
 效果：
 
 ```text
-│ PORT 22        │ listen │
-├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┼┄┄┄┄┄┄┄┄┤
-│ PORT 80        │ listen │
-├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┼┄┄┄┄┄┄┄┄┤
-│ PORT 443       │ listen │
+├───────────────┼─────────────────────────────────────────────────┤
+│ PORT 22       │ listen                                          │
+├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┼┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤
+│ PORT 80       │ listen                                          │
+├┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┼┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┤
+│ PORT 443      │ listen                                          │
+├───────────────┴─────────────────────────────────────────────────┤
 ```
 
 `mr_field 'LABEL' 'VALUE' 2` 和 `mr_field_dashed 'LABEL' 'VALUE'` 完全等价。
@@ -349,8 +323,8 @@ mr_register extras
 1. **加载期**：`core/*` 定义函数和常量；`sources/*` 顶部会执行少量
    环境探测（如 `uname -s`）；`handlers/*` 只做 `mr_register`（`00-cover.sh`
    例外，它在加载期注册标题行）。
-2. **采集期**：`main.sh` 调 `collect_shared_scalars` 和
-   `collect_platform_session`，把共享变量准备好。
+2. **采集期**：`main.sh` 依次调度 `collect_shared_scalars` 和
+   `collect_platform_session`；具体实现位于 `sources/`，把共享变量准备好。
 3. **handler 期**：按注册顺序调用 `handler_*`，把行追加到字段数组。
 4. **测量期**：`measure_fields` 批量算出 `NAME_W` / `DATA_W`（复杂文本只启动一次 Perl），
    再用 `measure_cover_lines` 保证标题不被截断，最后跑各 `_measure`。
@@ -473,57 +447,3 @@ _set_into() {
 
 mock 是“整块替换”，不是“补空”。新写的采集函数如果也要支持 mock，
 要在函数开头处理，否则 mock 打开后仍会查硬件。
-
-## 性能
-
-本脚本目标是“登录时跑一次”，不是每秒轮询，避免为了几毫秒引入复杂度。
-
-现状（M4 Mac，含 3 块盘）：
-
-- 总耗时约 `0.36–0.40s`
-- `disk collect` 约 `170ms`，其中两块 USB 盘各 `130ms` 左右，
-  已经是并行查询，墙钟取决于最慢的那块
-- 其余阶段多为系统命令自身耗时（`ioreg`、`sw_vers`、`ifconfig`）
-
-优化手段（按收益排序）：
-
-1. 合并调用：`sw_vers`、`sysctl`、`who`、`df`、`mount` 都只跑一次。
-2. 批量带宽测量：`_display_widths_batch` 一次 Perl 处理多串。
-3. 避免子 shell：用 `_xxx_into` 版本写入变量。
-4. 磁盘 SMART 按物理盘并行。
-
-不要做的事：加跨次结果缓存（数据会过期）、为几十毫秒拆散可读性。
-
-## 测试与自检
-
-提交前跑一遍：
-
-```bash
-./build.sh
-bash -n machine_report.sh
-
-# 合并后的完整 shellcheck（片段里的 disable 不参与）
-tmp=$(mktemp /tmp/report-lint.XXXXXX)
-{ printf '#!/usr/bin/env bash\nset -u\n'
-  for f in src/core/*.sh src/sources/*.sh src/handlers/*.sh src/main.sh; do
-      printf '# shellcheck source=%s\n. %q\n' "$f" "$f"
-  done; } >"$tmp"
-shellcheck -x -a "$tmp"
-
-# 演示数据必须完全可复现
-REPORT_MOCK_ENABLED=1 ./machine_report.sh > /tmp/mock-new.out
-
-# 真实模式 + 关掉可选数据源
-./machine_report.sh
-REPORT_SMART_ENABLED=0 ./machine_report.sh
-REPORT_GPU_ENABLED=0 ./machine_report.sh
-
-# macOS 自带 bash 3.2 也要能跑
-/bin/bash ./machine_report.sh
-
-# 分阶段耗时
-REPORT_PROFILE=1 ./machine_report.sh >/dev/null
-```
-
-改 UI 时的判定标准：`REPORT_MOCK_ENABLED=1` 的输出与改动前逐字节一致
-（除非你确实改了展示内容），真实模式只允许时间、负载、内存这类实时值变化。

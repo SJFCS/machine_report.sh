@@ -11,15 +11,15 @@
 #   HOSTNAME（另起一组）
 
 handler_identity() {
-    mr_field   'OS'          "$os_name"
-    mr_field   'KERNEL'      "$kernel_summary"
-    mr_field   'VIRT'        "$virt_type"
-    mr_field   'LOCALE'      "$locale_name"
-    mr_field   'TIMEZONE'    "$timezone_name"
-    mr_field   'SERVER'      "${server_manufacturer} · ${server_product_name}"
-    mr_field   'SYSTEM UUID' "$system_uuid"
-    mr_field   'UPTIME'      "$uptime"
-    mr_field_break 'HOSTNAME' "$hostname"
+    mr_field        'SERVER'      "${server_manufacturer} · ${server_product_name}"
+    mr_field        'SYSTEM UUID' "$system_uuid"    
+    mr_field        'ARCH'        "${server_arch}"    
+    mr_field        'VIRT'        "$virt_type"
+    mr_field_break  'OS'          "$os_name"
+    mr_field        'KERNEL'      "$kernel_summary"    
+    mr_field        'LOCALE'      "$locale_name"
+    mr_field        'TIMEZONE'    "$timezone_name"
+    mr_field        'UPTIME'      "$uptime"
 }
 
 mr_register identity

@@ -272,3 +272,24 @@ collect_dns_servers() {
     '
 }
 
+# [STAGE] collect_platform_session -> 厂商/型号/UUID 与 locale/时区/登录信息。
+collect_platform_session() {
+    _profile_begin 'platform'
+    if [ "$platform_name" = Darwin ]; then
+        # 厂商、型号和 UUID 都会读同一份 IOPlatformExpertDevice；先取一次，
+        # 后续 darwin_field 直接复用，避免每个字段都启动一次 ioreg。
+        DARWIN_PLATFORM_RAW=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null)
+    fi
+    server_manufacturer=$(detect_manufacturer)
+    server_product_name=$(detect_product_name)
+    virt_type=$(detect_virtualization)
+    system_uuid=$(detect_system_uuid)
+    _profile_end
+    _profile_begin 'session'
+    locale_name=$(detect_locale)
+    timezone_name=$(detect_timezone)
+    login_user=$(detect_login_user)
+    login_client=$(detect_login_client)
+    _profile_end
+}
+
