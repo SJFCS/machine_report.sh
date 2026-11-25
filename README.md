@@ -282,6 +282,7 @@ GPU 数据继续。可用 `REPORT_GPU_TIMEOUT` 调整秒数，设为 `0` 可取�
 - `src/main.sh`：采集 → 运行 handler → 测量列宽 → 回填 → 渲染
 - `build.sh`：按 core → sources → handlers → main 的顺序合并成
   `machine_report.sh`
+- `docs/DEVELOPMENT.md`：开发文档（handler 契约、`mr_*` API、约定与测试）
 
 数值换算优先使用 Bash 内建定点运算；只有无法用整数精度安全表达或需要
 解析整段文本时才回退到 awk。标题、页脚和字段行合并为一次 Perl 渲染，
