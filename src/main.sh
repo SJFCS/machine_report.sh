@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2154
+# shellcheck disable=SC2034
 #
 # ── 执行入口 ───────────────────────────────────────────────────────────
 #
@@ -68,6 +70,7 @@ done
 # 3) 列宽测量：先统一测量，再让 handler 微调、回填依赖宽度的值。
 _profile_begin 'layout measure'
 measure_fields
+measure_cover_lines
 for __mr_name in "${MR_HANDLERS[@]}"; do
     if declare -F "handler_${__mr_name}_measure" >/dev/null 2>&1; then
         "handler_${__mr_name}_measure"

@@ -5,6 +5,10 @@
 # 数据在 main 的 collect 阶段准备好（os_name / kernel_summary / virt_type /
 # locale_name / timezone_name / server_manufacturer / server_product_name /
 # system_uuid / uptime / hostname），这里只负责排版成字段行。
+#
+# 本文件绘制的行（注释掉对应的 mr_field 就不显示）：
+#   OS / KERNEL / VIRT / LOCALE / TIMEZONE / SERVER / SYSTEM UUID / UPTIME
+#   HOSTNAME（另起一组）
 
 handler_identity() {
     mr_field   'OS'          "$os_name"

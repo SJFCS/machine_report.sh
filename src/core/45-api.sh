@@ -39,9 +39,23 @@
 # 已注册的 handler 名称，顺序即渲染顺序。
 MR_HANDLERS=()
 
+# 表格上方的标题行与表格下方的页脚行（都支持中文/ANSI，自动居中）。
+MR_COVER_LINES=()
+MR_FOOTER_LINES=()
+
 # mr_register NAME -> 追加一个 handler。
 mr_register() {
     MR_HANDLERS+=("${1-}")
+}
+
+# mr_cover_line TEXT -> 在表格上方追加一行居中文字；注释掉就不再显示。
+mr_cover_line() {
+    MR_COVER_LINES+=("${1-}")
+}
+
+# mr_footer_line TEXT -> 在表格下方追加一行居中文字；注释掉就不再显示。
+mr_footer_line() {
+    MR_FOOTER_LINES+=("${1-}")
 }
 
 # mr_field LABEL VALUE [BREAK] -> 追加一行字段（BREAK: 0 无 | 1 实线 | 2 虚线）。

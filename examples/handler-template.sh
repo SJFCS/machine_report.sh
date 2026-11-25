@@ -7,6 +7,7 @@
 #   ./build.sh
 #
 # 只要不调用框架内部函数，这里出现的就是全部 API。
+# 想改标题/页脚而不加字段，见 src/handlers/00-cover.sh。
 
 # 第一个钩子：采集数据并添加字段。
 handler_mything() {

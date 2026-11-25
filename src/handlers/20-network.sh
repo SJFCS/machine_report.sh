@@ -5,6 +5,8 @@
 # 采集和展示放在一起：这个 handler 自己调用 collect_dns_servers /
 # collect_network_interfaces，再把结果交给 mr_field。
 # 页脚的 SERVER/CLIENT 行也在这里生成，因为它们依赖主 IP 和登录信息。
+#
+# 本文件绘制的行：DNS / 每个网卡一行 NIC <名字> / 页脚 SERVER、CLIENT
 
 handler_network() {
     local nic_name='' nic_ip='' primary_ip=''
@@ -23,14 +25,9 @@ handler_network() {
     fi
     _profile_end
 
-    server_display="${C_K}SERVER${C_RESET} ${C_V}${login_user}@${hostname} ${primary_ip}${C_RESET}"
-    client_display="${C_MUTED}CLIENT ${login_client}${C_RESET}"
-}
-
-# 页脚是跨列文本，列宽测量后要保证放得下。
-handler_network_measure() {
-    ensure_centered_width "$server_display"
-    ensure_centered_width "$client_display"
+    # 页脚两行；不需要就把对应那行注释掉。
+    mr_footer_line "${C_K}SERVER${C_RESET} ${C_V}${login_user}@${hostname} ${primary_ip}${C_RESET}"
+    mr_footer_line "${C_MUTED}CLIENT ${login_client}${C_RESET}"
 }
 
 mr_register network

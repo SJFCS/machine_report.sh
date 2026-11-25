@@ -4,6 +4,9 @@
 #
 # mem_total/mem_used/mem_cache/mem_free/mem_shared/mem_available 由
 # sources/system.sh 采集（单位 GiB）。这里负责百分比、展示值和占用条。
+#
+# 本文件绘制的行：MEM TOTAL / MEM USAGE / MEM USED / BUFF/CACHE /
+#   MEM FREE / MEM SHARED / MEM AVAILABLE
 
 # “是否正常”看 available，而不是看 used：used 高不代表新进程没有内存
 # 可用，因为 buff/cache 中可以回收一部分。阈值可按业务调整；这里采用

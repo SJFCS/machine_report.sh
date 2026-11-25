@@ -35,17 +35,17 @@ Apple Silicon 的 GPU 型号、核心数、统一内存占用和利用率来自 
 
 ### 可选工具
 
-| 工具                  | 启用内容                               | 缺失时的行为                                       |
-| --------------------- | -------------------------------------- | -------------------------------------------------- |
-| `nvidia-smi`          | NVIDIA GPU 型号、显存和利用率          | 显示 `GPU -`，可用 `REPORT_GPU_ENABLED=0` 跳过采集 |
-| `lsblk`               | Linux 物理磁盘、分区、文件系统与挂载点 | 不输出物理磁盘行                                   |
-| `ip`                  | IPv4 网卡与主 IP                       | 不输出网卡行                                       |
-| `lscpu`               | Linux CPU 型号与频率                   | 回退读取 `/proc/cpuinfo`，频率可能显示为 `-`       |
-| `dmidecode`           | sysfs 不可用时的 DMI 厂商、型号和 UUID | 对应字段显示 `UNKNOWN`；通常需要 root              |
-| `systemd-detect-virt` | 虚拟化类型                             | 回退 DMI 信息，可能显示 `BARE METAL`               |
-| `timedatectl`         | IANA 时区名称                          | 回退 `/etc/timezone` 或 `/etc/localtime`           |
-| `timeout`             | 限制 `nvidia-smi` 运行时间             | 回退使用 Perl `alarm` 实现超时                     |
-| `resolvectl`          | 系统中配置的上游 DNS                   | 回退读取 `/etc/resolv.conf`                        |
+| 工具                  | 启用内容                                     | 缺失时的行为                                         |
+| --------------------- | -------------------------------------------- | ---------------------------------------------------- |
+| `nvidia-smi`          | NVIDIA GPU 型号、显存和利用率                | 显示 `GPU -`，可用 `REPORT_GPU_ENABLED=0` 跳过采集   |
+| `lsblk`               | Linux 物理磁盘、分区、文件系统与挂载点       | 不输出物理磁盘行                                     |
+| `ip`                  | IPv4 网卡与主 IP                             | 不输出网卡行                                         |
+| `lscpu`               | Linux CPU 型号与频率                         | 回退读取 `/proc/cpuinfo`，频率可能显示为 `-`         |
+| `dmidecode`           | sysfs 不可用时的 DMI 厂商、型号和 UUID       | 对应字段显示 `UNKNOWN`；通常需要 root                |
+| `systemd-detect-virt` | 虚拟化类型                                   | 回退 DMI 信息，可能显示 `BARE METAL`                 |
+| `timedatectl`         | IANA 时区名称                                | 回退 `/etc/timezone` 或 `/etc/localtime`             |
+| `timeout`             | 限制 `nvidia-smi` 运行时间                   | 回退使用 Perl `alarm` 实现超时                       |
+| `resolvectl`          | 系统中配置的上游 DNS                         | 回退读取 `/etc/resolv.conf`                          |
 | `smartctl`            | 磁盘 SMART 健康、磨损程度和 CRC/INTEG 错误数 | 对应项显示 `N/A`；可用 `REPORT_SMART_ENABLED=0` 跳过 |
 
 SMART 采集依赖 smartmontools。Linux 通常需要 root 才能读取磁盘的
@@ -64,12 +64,12 @@ SMART  │ HEALTH PASSED · WEAR 4% · INTEG 0
 SMART  │ HEALTH PASSED · WEAR 4% · CRC 0
 ```
 
-| 字段          | 含义                                                                 | 数据来源                                                       |
-| ------------- | -------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `HEALTH`      | 磁盘整体健康自检结果；`PASSED`/`OK` 正常，`FAILED` 表示厂商预测可能故障 | `smartctl` 的 overall-health 或 SMART Health Status            |
-| `WEAR`        | 已消耗寿命百分比，数值越低越好；`4%` 表示约剩 96% 寿命                | NVMe `Percentage Used`；SATA 用规范化剩余寿命换算              |
-| `INTEG`       | NVMe 的介质/数据完整性错误数，不是 CRC；`0` 为正常，持续增长需关注；也是错误计数不可用时的默认标签 | NVMe `Media and Data Integrity Errors`                         |
-| `CRC`         | SATA/SAS 链路传输 CRC 错误数；`0` 为正常，增长常见于线材、背板或接口问题 | `UDMA_CRC_Error_Count` 等 SMART 属性或 SAS `CRC errors`        |
+| 字段     | 含义                                                                                               | 数据来源                                                |
+| -------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `HEALTH` | 磁盘整体健康自检结果；`PASSED`/`OK` 正常，`FAILED` 表示厂商预测可能故障                            | `smartctl` 的 overall-health 或 SMART Health Status     |
+| `WEAR`   | 已消耗寿命百分比，数值越低越好；`4%` 表示约剩 96% 寿命                                             | NVMe `Percentage Used`；SATA 用规范化剩余寿命换算       |
+| `INTEG`  | NVMe 的介质/数据完整性错误数，不是 CRC；`0` 为正常，持续增长需关注；也是错误计数不可用时的默认标签 | NVMe `Media and Data Integrity Errors`                  |
+| `CRC`    | SATA/SAS 链路传输 CRC 错误数；`0` 为正常，增长常见于线材、背板或接口问题                           | `UDMA_CRC_Error_Count` 等 SMART 属性或 SAS `CRC errors` |
 
 `WEAR`、`INTEG`、`CRC` 为 `-` 表示该项不可用，不一定表示磁盘故障。
 HDD 通常没有磨损百分比，因此 `WEAR` 会显示 `-`。
@@ -139,10 +139,10 @@ curl -fsSL https://raw.githubusercontent.com/SJFCS/machine_report.sh/main/instal
 
 当前用户和 root 系统安装写入的位置不同：
 
-| shell | 当前用户安装 | root 系统安装 |
-| ----- | ------------ | ------------- |
-| bash | `~/.bashrc`（交互式），以及 `~/.bash_profile`、`~/.bash_login`、`~/.profile` 中 bash 登录时实际读取的第一个文件 | `/etc/profile` |
-| zsh | `~/.zshrc`（交互式，登录 zsh 也会读取） | 已有的 `/etc/zprofile` 或 `/etc/zsh/zprofile` |
+| shell | 当前用户安装                                                                                                    | root 系统安装                                 |
+| ----- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| bash  | `~/.bashrc`（交互式），以及 `~/.bash_profile`、`~/.bash_login`、`~/.profile` 中 bash 登录时实际读取的第一个文件 | `/etc/profile`                                |
+| zsh   | `~/.zshrc`（交互式，登录 zsh 也会读取）                                                                         | 已有的 `/etc/zprofile` 或 `/etc/zsh/zprofile` |
 
 当前用户安装会在每次打开交互式 bash/zsh 时自动展示一次报告；root 系统
 安装会在登录时自动展示。临时关闭自动展示可设置 `MREPORT_AUTORUN=0`；
@@ -276,6 +276,7 @@ GPU 数据继续。可用 `REPORT_GPU_TIMEOUT` 调整秒数，设为 `0` 可取�
   - `platform.sh`：平台、身份、Locale 与网卡
   - `gpu-disk.sh`：GPU 与磁盘（含 SMART）
 - `src/handlers/`：展示层，一个文件一个 handler
+  - `00-cover.sh`：标题与页脚文字（注释掉就隐藏）
   - `10-identity.sh`、`20-network.sh`、`30-compute.sh`、
     `40-gpu.sh`、`50-memory.sh`、`60-disk.sh`
 - `src/main.sh`：采集 → 运行 handler → 测量列宽 → 回填 → 渲染
@@ -287,6 +288,21 @@ GPU 数据继续。可用 `REPORT_GPU_TIMEOUT` 调整秒数，设为 `0` 可取�
 避免按单元格或按行启动解释器。
 
 ## 自定义 handler
+
+标题和页脚在 `src/handlers/00-cover.sh` 里，改字符串即可：
+
+```bash
+REPORT_TITLE=${REPORT_TITLE-'服务器运行报告'}
+REPORT_SUBTITLE=${REPORT_SUBTITLE-'PVE Platform'}
+REPORT_ENVIRONMENT=${REPORT_ENVIRONMENT-'PRODUCTION'}
+
+mr_cover_line "${C_TITLE}${REPORT_TITLE}${C_RESET}"     # 注释掉就隐藏
+mr_footer_line "${C_ENV}ENVIRONMENT · ${REPORT_ENVIRONMENT}${C_RESET}"
+```
+
+`mr_cover_line` / `mr_footer_line` 可以调用任意多次，写几行显示几行，
+自动居中；文字比表格宽时表格会自动变宽。也支持环境变量覆盖，例如
+`REPORT_TITLE='我的机器' ./machine_report.sh`，传空串则不显示该行。
 
 获取数据、排版都只写在一个文件里，不需要读框架代码：
 
@@ -311,14 +327,16 @@ mr_register mything
 
 `mr_*` 一览：
 
-| 函数 | 作用 |
-| --- | --- |
-| `mr_field LABEL VALUE [BREAK]` | 添加一行；`BREAK` 0 无分隔线、1 实线、2 虚线 |
-| `mr_field_break` / `mr_field_dashed` | 添加一行并画实线 / 虚线 |
-| `mr_update INDEX VALUE` | 列宽确定后回填某一行的值 |
-| `mr_width` / `mr_pad` / `mr_fit` | 显示宽度、右补空格、超宽截断 |
-| `mr_bar VALUE TOTAL [WIDTH]` | 无颜色百分比条，省略宽度时用 `DATA_W` |
-| `mr_percent_bar VALUE TOTAL PERCENT` | 百分比条 + 右侧百分比文本 |
+| 函数                                 | 作用                                         |
+| ------------------------------------ | -------------------------------------------- |
+| `mr_field LABEL VALUE [BREAK]`       | 添加一行；`BREAK` 0 无分隔线、1 实线、2 虚线 |
+| `mr_field_break` / `mr_field_dashed` | 添加一行并画实线 / 虚线                      |
+| `mr_update INDEX VALUE`              | 列宽确定后回填某一行的值                     |
+| `mr_width` / `mr_pad` / `mr_fit`     | 显示宽度、右补空格、超宽截断                 |
+| `mr_bar VALUE TOTAL [WIDTH]`         | 无颜色百分比条，省略宽度时用 `DATA_W`        |
+| `mr_percent_bar VALUE TOTAL PERCENT` | 百分比条 + 右侧百分比文本                    |
+| `mr_cover_line TEXT`                 | 表格上方加一行居中文字                       |
+| `mr_footer_line TEXT`                | 表格下方加一行居中文字                       |
 
 可选钩子：
 

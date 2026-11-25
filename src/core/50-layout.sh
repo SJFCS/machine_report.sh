@@ -18,7 +18,7 @@ measure_fields() {
 
 # [TABLE] ensure_centered_width TEXT -> 扩展 DATA_W 以完整容纳跨列文本。
 # 两侧至少预留一个空格，避免文字贴住左右边框。
-# 用法：ensure_centered_width "$server_display"
+# 用法：ensure_centered_width "$text"（一般由 measure_cover_lines 统一调用）
 ensure_centered_width() {
     local text=$1 inner text_width required
     inner=$((NAME_W + DATA_W + 5))
@@ -27,6 +27,39 @@ ensure_centered_width() {
     if (( required > inner )); then
         DATA_W=$((DATA_W + required - inner))
     fi
+}
+
+# [TABLE] measure_cover_lines -> 保证封面/页脚文字不会被表格宽度截断。
+# 文字来自 mr_cover_line / mr_footer_line，数量不限。
+# 先用“每个字符最多占 2 列”做上界：常见的一两行标题明显放得下，
+# 就不用为中文标题启动 Perl；只有可能超宽的行才批量精确测量一次。
+measure_cover_lines() {
+    local i text inner max_width=0 width required
+    local -a texts=()
+    local -a too_wide=()
+
+    for i in "${!MR_COVER_LINES[@]}"; do
+        texts+=("${MR_COVER_LINES[i]}")
+    done
+    for i in "${!MR_FOOTER_LINES[@]}"; do
+        texts+=("${MR_FOOTER_LINES[i]}")
+    done
+    (( ${#texts[@]} > 0 )) || return 0
+
+    inner=$((NAME_W + DATA_W + 5))
+    for text in "${texts[@]}"; do
+        (( ${#text} * 2 + 2 > inner )) || continue
+        too_wide+=("$text")
+    done
+    (( ${#too_wide[@]} > 0 )) || return 0
+
+    while IFS= read -r -d '' width; do
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        (( width > max_width )) && max_width=$width
+    done < <(_display_widths_batch "${too_wide[@]}")
+
+    required=$((max_width + 2))
+    (( required > inner )) && DATA_W=$((DATA_W + required - inner))
 }
 
 # [TABLE] ensure_data_width TEXT -> 保证指定值至少占 DATA_W 宽。

@@ -1190,9 +1190,23 @@ color_kv_segments() {
 # 已注册的 handler 名称，顺序即渲染顺序。
 MR_HANDLERS=()
 
+# 表格上方的标题行与表格下方的页脚行（都支持中文/ANSI，自动居中）。
+MR_COVER_LINES=()
+MR_FOOTER_LINES=()
+
 # mr_register NAME -> 追加一个 handler。
 mr_register() {
     MR_HANDLERS+=("${1-}")
+}
+
+# mr_cover_line TEXT -> 在表格上方追加一行居中文字；注释掉就不再显示。
+mr_cover_line() {
+    MR_COVER_LINES+=("${1-}")
+}
+
+# mr_footer_line TEXT -> 在表格下方追加一行居中文字；注释掉就不再显示。
+mr_footer_line() {
+    MR_FOOTER_LINES+=("${1-}")
 }
 
 # mr_field LABEL VALUE [BREAK] -> 追加一行字段（BREAK: 0 无 | 1 实线 | 2 虚线）。
@@ -1260,7 +1274,7 @@ measure_fields() {
 
 # [TABLE] ensure_centered_width TEXT -> 扩展 DATA_W 以完整容纳跨列文本。
 # 两侧至少预留一个空格，避免文字贴住左右边框。
-# 用法：ensure_centered_width "$server_display"
+# 用法：ensure_centered_width "$text"（一般由 measure_cover_lines 统一调用）
 ensure_centered_width() {
     local text=$1 inner text_width required
     inner=$((NAME_W + DATA_W + 5))
@@ -1269,6 +1283,39 @@ ensure_centered_width() {
     if (( required > inner )); then
         DATA_W=$((DATA_W + required - inner))
     fi
+}
+
+# [TABLE] measure_cover_lines -> 保证封面/页脚文字不会被表格宽度截断。
+# 文字来自 mr_cover_line / mr_footer_line，数量不限。
+# 先用“每个字符最多占 2 列”做上界：常见的一两行标题明显放得下，
+# 就不用为中文标题启动 Perl；只有可能超宽的行才批量精确测量一次。
+measure_cover_lines() {
+    local i text inner max_width=0 width required
+    local -a texts=()
+    local -a too_wide=()
+
+    for i in "${!MR_COVER_LINES[@]}"; do
+        texts+=("${MR_COVER_LINES[i]}")
+    done
+    for i in "${!MR_FOOTER_LINES[@]}"; do
+        texts+=("${MR_FOOTER_LINES[i]}")
+    done
+    (( ${#texts[@]} > 0 )) || return 0
+
+    inner=$((NAME_W + DATA_W + 5))
+    for text in "${texts[@]}"; do
+        (( ${#text} * 2 + 2 > inner )) || continue
+        too_wide+=("$text")
+    done
+    (( ${#too_wide[@]} > 0 )) || return 0
+
+    while IFS= read -r -d '' width; do
+        [[ $width =~ ^[0-9]+$ ]] || width=0
+        (( width > max_width )) && max_width=$width
+    done < <(_display_widths_batch "${too_wide[@]}")
+
+    required=$((max_width + 2))
+    (( required > inner )) && DATA_W=$((DATA_W + required - inner))
 }
 
 # [TABLE] ensure_data_width TEXT -> 保证指定值至少占 DATA_W 宽。
@@ -1607,36 +1654,45 @@ stacked_bar() {
 #
 # ── [CORE] 最终渲染 ────────────────────────────────────────────────────
 
-# [REPORT] render_report -> 渲染标题、字段行和页脚。
+# [REPORT] render_report -> 渲染封面、字段行和页脚。
+# 封面来自 MR_COVER_LINES，页脚来自 MR_FOOTER_LINES（见 handlers/00-cover.sh
+# 和 20-network.sh）；数组里没有内容时对应位置不会输出。
 # 前置条件：字段已组装、measure_fields 已执行、动态值已回填。
 # 用法：render_report
 render_report() {
-    local title='服务器运行报告'
-    local subtitle='PVE Platform'
-    local environment='PRODUCTION'
-    local line
+    local line i cover_count footer_count dummy=0
     local -a centered_lines=()
     local -a field_lines=()
     local -a centered_texts=()
 
-    centered_texts=(
-        "${C_TITLE}${title}${C_RESET}"
-        "${C_ACCENT}${subtitle}${C_RESET}"
-        "${C_ENV}ENVIRONMENT · ${environment}${C_RESET}"
-        "$server_display"
-        "$client_display"
-    )
+    cover_count=${#MR_COVER_LINES[@]}
+    footer_count=${#MR_FOOTER_LINES[@]}
+    if (( cover_count > 0 )); then
+        centered_texts+=("${MR_COVER_LINES[@]}")
+    fi
+    if (( footer_count > 0 )); then
+        centered_texts+=("${MR_FOOTER_LINES[@]}")
+    fi
+    # 一行居中文字都没有时给 Perl 一个占位符，输出阶段会跳过它。
+    if (( ${#centered_texts[@]} == 0 )); then
+        centered_texts=('')
+        dummy=1
+    fi
 
-    # 标题、页脚和所有字段行合并到一个 Perl 进程。
+    # 封面、页脚和所有字段行合并到一个 Perl 进程。
     while IFS= read -r -d '' line; do
         case ${line:0:1} in
             C) centered_lines+=("${line:1}") ;;
             R) field_lines+=("${line:1}") ;;
         esac
     done < <(_format_report_lines "${centered_texts[@]}")
+    (( dummy == 0 )) || centered_lines=()
 
     print_header
-    printf '%s\n' "${centered_lines[0]}" "${centered_lines[1]}"
+    for ((i = 0; i < cover_count; i++)); do
+        [ -n "${MR_COVER_LINES[i]}" ] || continue
+        printf '%s\n' "${centered_lines[i]}"
+    done
     print_divider "$MID_LEFT" "$TOP_MID" "$MID_RIGHT"
 
     for i in "${!FIELD_LABELS[@]}"; do
@@ -1651,10 +1707,10 @@ render_report() {
 
     # 页脚跨两列：上方竖线用 ┴ 结束，底边使用连续横线。
     print_divider "$MID_LEFT" "$BOTTOM_MID" "$MID_RIGHT"
-    printf '%s\n' \
-        "${centered_lines[2]}" \
-        "${centered_lines[3]}" \
-        "${centered_lines[4]}"
+    for ((i = 0; i < footer_count; i++)); do
+        [ -n "${MR_FOOTER_LINES[i]}" ] || continue
+        printf '%s\n' "${centered_lines[cover_count + i]}"
+    done
     print_merged_divider "$BOTTOM_LEFT" "$BOTTOM_RIGHT"
 }
 
@@ -2906,11 +2962,39 @@ collect_real_scalars() {
 
 # shellcheck shell=bash
 #
+# ── 封面与页脚 ─────────────────────────────────────────────────────────
+#
+# 这里就是报告最上面和最下面的几行文字，改字符串即可自定义；
+# 把某一行的 mr_cover_line / mr_footer_line 注释掉，那一行就不显示。
+# 想加一行，照抄一行再改文字即可（可以加任意多行，都会自动居中）。
+#
+# 三个 *_TITLE / *_SUBTITLE / *_ENVIRONMENT 变量也支持用环境变量覆盖，
+# 例如：REPORT_TITLE='我的机器' ./machine_report.sh
+
+# 用 ${VAR-default} 而不是 ${VAR:-default}：显式传空串也能把这一行关掉。
+REPORT_TITLE=${REPORT_TITLE-'服务器运行报告'}
+REPORT_SUBTITLE=${REPORT_SUBTITLE-'PVE Platform'}
+REPORT_ENVIRONMENT=${REPORT_ENVIRONMENT-'PRODUCTION'}
+
+[ -n "${REPORT_TITLE:-}" ] &&
+    mr_cover_line "${C_TITLE}${REPORT_TITLE}${C_RESET}"
+[ -n "${REPORT_SUBTITLE:-}" ] &&
+    mr_cover_line "${C_ACCENT}${REPORT_SUBTITLE}${C_RESET}"
+
+# 页脚：ENVIRONMENT 固定在前，SERVER/CLIENT 由 20-network.sh 追加。
+[ -n "${REPORT_ENVIRONMENT:-}" ] &&
+    mr_footer_line "${C_ENV}ENVIRONMENT · ${REPORT_ENVIRONMENT}${C_RESET}"
+# shellcheck shell=bash
+#
 # ── [HANDLER] 身份与系统基本信息 ───────────────────────────────────────
 #
 # 数据在 main 的 collect 阶段准备好（os_name / kernel_summary / virt_type /
 # locale_name / timezone_name / server_manufacturer / server_product_name /
 # system_uuid / uptime / hostname），这里只负责排版成字段行。
+#
+# 本文件绘制的行（注释掉对应的 mr_field 就不显示）：
+#   OS / KERNEL / VIRT / LOCALE / TIMEZONE / SERVER / SYSTEM UUID / UPTIME
+#   HOSTNAME（另起一组）
 
 handler_identity() {
     mr_field   'OS'          "$os_name"
@@ -2932,6 +3016,8 @@ mr_register identity
 # 采集和展示放在一起：这个 handler 自己调用 collect_dns_servers /
 # collect_network_interfaces，再把结果交给 mr_field。
 # 页脚的 SERVER/CLIENT 行也在这里生成，因为它们依赖主 IP 和登录信息。
+#
+# 本文件绘制的行：DNS / 每个网卡一行 NIC <名字> / 页脚 SERVER、CLIENT
 
 handler_network() {
     local nic_name='' nic_ip='' primary_ip=''
@@ -2950,14 +3036,9 @@ handler_network() {
     fi
     _profile_end
 
-    server_display="${C_K}SERVER${C_RESET} ${C_V}${login_user}@${hostname} ${primary_ip}${C_RESET}"
-    client_display="${C_MUTED}CLIENT ${login_client}${C_RESET}"
-}
-
-# 页脚是跨列文本，列宽测量后要保证放得下。
-handler_network_measure() {
-    ensure_centered_width "$server_display"
-    ensure_centered_width "$client_display"
+    # 页脚两行；不需要就把对应那行注释掉。
+    mr_footer_line "${C_K}SERVER${C_RESET} ${C_V}${login_user}@${hostname} ${primary_ip}${C_RESET}"
+    mr_footer_line "${C_MUTED}CLIENT ${login_client}${C_RESET}"
 }
 
 mr_register network
@@ -2967,6 +3048,8 @@ mr_register network
 #
 # CPU 型号、核数和负载由 sources/system.sh 在 collect 阶段采集。
 # 负载条依赖列宽，所以先占位，等 handler_compute_fill 再回填。
+#
+# 本文件绘制的行：每个 Socket 一行 CPU <序号> / CORES / LOAD 1m、5m、15m
 
 handler_compute() {
     local i model break_before
@@ -3005,6 +3088,8 @@ mr_register compute
 #
 # collect_gpu_rows 输出 TSV：NAME TOTAL_MIB USED_MIB UTIL MIN MAX METRICS。
 # 每块 GPU 先加一行型号，有实时指标时再加 MEM / UTIL 两行占位。
+#
+# 本文件绘制的行：GPU <序号> / GPU <序号> MEM / GPU <序号> UTIL
 
 handler_gpu() {
     local gpu_name='' gpu_total='' gpu_used='' gpu_util=''
@@ -3076,6 +3161,9 @@ mr_register gpu
 #
 # mem_total/mem_used/mem_cache/mem_free/mem_shared/mem_available 由
 # sources/system.sh 采集（单位 GiB）。这里负责百分比、展示值和占用条。
+#
+# 本文件绘制的行：MEM TOTAL / MEM USAGE / MEM USED / BUFF/CACHE /
+#   MEM FREE / MEM SHARED / MEM AVAILABLE
 
 # “是否正常”看 available，而不是看 used：used 高不代表新进程没有内存
 # 可用，因为 buff/cache 中可以回收一部分。阈值可按业务调整；这里采用
@@ -3202,6 +3290,8 @@ mr_register memory
 #   NAME SIZE MEDIA MOUNTS PCT USED AVAIL FORMAT HEALTH WEAR ERR_LABEL ERR
 # 这里把每块盘拆成 DEVICE / SPACE / DISK USAGE / MOUNTS / SMART 五行，
 # 三列文本按最宽单元格对齐；使用率条形图等列宽确定后再回填。
+#
+# 本文件绘制的行（每块盘一组）：DEVICE / SPACE / DISK USAGE / MOUNTS / SMART
 
 DISK_BAR_ROWS=()
 DISK_BAR_PCTS=()
@@ -3441,6 +3531,7 @@ done
 # 3) 列宽测量：先统一测量，再让 handler 微调、回填依赖宽度的值。
 _profile_begin 'layout measure'
 measure_fields
+measure_cover_lines
 for __mr_name in "${MR_HANDLERS[@]}"; do
     if declare -F "handler_${__mr_name}_measure" >/dev/null 2>&1; then
         "handler_${__mr_name}_measure"

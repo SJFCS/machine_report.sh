@@ -4,6 +4,8 @@
 #
 # collect_gpu_rows 输出 TSV：NAME TOTAL_MIB USED_MIB UTIL MIN MAX METRICS。
 # 每块 GPU 先加一行型号，有实时指标时再加 MEM / UTIL 两行占位。
+#
+# 本文件绘制的行：GPU <序号> / GPU <序号> MEM / GPU <序号> UTIL
 
 handler_gpu() {
     local gpu_name='' gpu_total='' gpu_used='' gpu_util=''

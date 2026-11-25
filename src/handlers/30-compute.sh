@@ -4,6 +4,8 @@
 #
 # CPU 型号、核数和负载由 sources/system.sh 在 collect 阶段采集。
 # 负载条依赖列宽，所以先占位，等 handler_compute_fill 再回填。
+#
+# 本文件绘制的行：每个 Socket 一行 CPU <序号> / CORES / LOAD 1m、5m、15m
 
 handler_compute() {
     local i model break_before
