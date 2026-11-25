@@ -42,7 +42,11 @@ build.sh      按 core → sources → handlers → main 合并成 machine_repor
 分层规则：
 
 - `sources/` 不认识 UI，只 `printf` 数据；不要在里面画线、加颜色。
-- `handlers/` 认识 `mr_*`，负责把数据变成字段行；不要写画线、测量逻辑。
+- `handlers/` 认识 `mr_*`，负责把数据变成字段行。
+  分隔线只声明“这一行上面要一条线”（`BREAK` 0/1/2 或 `mr_field_break`），
+  具体画 `─` 还是 `┄`、画多长由 core 决定，handler 里不出现画线字符。
+  整表列宽由 core 统一测量；局部多列对齐（如磁盘的 DEVICE/SPACE 三列）
+  可以调用 core 的测量工具，但不要把画线逻辑搬进 handler。
 - `core/` 只提供能力和最终渲染，不包含具体业务字段。
 
 渲染流程：
