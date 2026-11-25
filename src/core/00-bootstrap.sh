@@ -54,6 +54,8 @@
 #      等待时，信号也可能延迟生效；需要稳定速度时应直接跳过 GPU。
 # SMART：需要 smartmontools 的 smartctl。REPORT_SMART_ENABLED=0 跳过采集；
 #        REPORT_SMART_TIMEOUT 控制单块磁盘超时秒数（默认 2，0 表示不限制）。
+# NTP：REPORT_NTP_ENABLED=0 跳过同步状态采集；REPORT_NTP_TIMEOUT 控制
+#       macOS sntp 查询超时秒数（默认 1，0 表示不限制）。
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
 #
 # ── 函数索引（内核开发用） ──────────────────────────────────────────────
@@ -136,6 +138,8 @@ _report_parse_bool REPORT_GPU_ENABLED "${REPORT_GPU_ENABLED:-1}" || exit $?
 _report_parse_seconds REPORT_GPU_TIMEOUT "${REPORT_GPU_TIMEOUT:-1}" || exit $?
 _report_parse_bool REPORT_SMART_ENABLED "${REPORT_SMART_ENABLED:-1}" || exit $?
 _report_parse_seconds REPORT_SMART_TIMEOUT "${REPORT_SMART_TIMEOUT:-2}" || exit $?
+_report_parse_bool REPORT_NTP_ENABLED "${REPORT_NTP_ENABLED:-1}" || exit $?
+_report_parse_seconds REPORT_NTP_TIMEOUT "${REPORT_NTP_TIMEOUT:-1}" || exit $?
 
 # 计时器
 _profile_now_into() {

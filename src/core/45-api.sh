@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2154
+# shellcheck disable=SC2034
 #
 # ── handler 公开 API ───────────────────────────────────────────────────
 #

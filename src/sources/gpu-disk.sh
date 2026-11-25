@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2154
+
 # ── [HANDLER / MOCK] GPU ───────────────────────────────────────────────
 
 # [MOCK] demo_gpu_rows -> 两块 A100 的 GPU 演示 TSV。
@@ -20,23 +22,34 @@ collect_macos_gpu_rows() {
 
     raw=$(ioreg -r -c AGXAccelerator -d 1 2>/dev/null)
     if [ -n "$raw" ]; then
-        # 四组字段来自同一份 ioreg 输出，合成一次 awk 解析，
-        # 避免为 model/cores/util/used 各起一条 sed + head 管道。
+        # 四组字段来自同一份 ioreg 输出，合成一次 awk 解析。
+        # 新版 macOS 会把 PerformanceStatistics 整个字典压在同一行，
+        # 因此逐个扫描引号字段，不能假定每个键独占一行。
         IFS=$'\t' read -r model cores util used_bytes < <(
             printf '%s\n' "$raw" | awk -F'"' '
-                function field_value(   value) {
-                    value = $4
-                    if (value == "") {
-                        value = $3
+                function field_value_at(i,   value) {
+                    value = $(i + 1)
+                    if (value ~ /^[[:space:]]*=[[:space:]]*[0-9]/) {
                         sub(/^[^0-9]*/, "", value)
                         sub(/[^0-9].*$/, "", value)
+                        return value
                     }
+                    value = $(i + 2)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
                     return value
                 }
-                $2 == "model" && model == "" { model = field_value() }
-                $2 == "gpu-core-count" && cores == "" { cores = field_value() }
-                $2 == "Device Utilization %" && util == "" { util = field_value() }
-                $2 == "In use system memory" && used == "" { used = field_value() }
+                {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == "model" && model == "")
+                            model = field_value_at(i)
+                        if ($i == "gpu-core-count" && cores == "")
+                            cores = field_value_at(i)
+                        if ($i == "Device Utilization %" && util == "")
+                            util = field_value_at(i)
+                        if ($i == "In use system memory" && used == "")
+                            used = field_value_at(i)
+                    }
+                }
                 END { print model "\t" cores "\t" util "\t" used }
             '
         )

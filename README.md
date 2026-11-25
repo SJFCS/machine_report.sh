@@ -4,8 +4,9 @@ English | [简体中文](README_ZH.md)
 
 Inspect server status from your terminal. A single run reports the operating
 system, CPU and load, GPU, memory, disks and SMART health, network interfaces,
-and DNS. Missing tools or insufficient permissions degrade individual fields
-without interrupting the report.
+DNS, and NTP synchronization status, server, and clock offset. Missing tools
+or insufficient permissions degrade individual fields without interrupting
+the report.
 
 Works on Linux and macOS. The report is a single-file Bash script and requires
 Bash 3.2+, awk, and Perl 5. For GPU and SMART data, install `nvidia-smi` and
@@ -45,10 +46,12 @@ accept `0/1`, `true/false`, `yes/no`, and `on/off`.
 | --- | --- | --- |
 | `REPORT_MOCK_ENABLED` | `0` | Set to `1` to use built-in demo GPU, disk, and scalar data |
 | `REPORT_PROFILE` | `0` | Set to `1` to write stage timings to stderr |
-| `REPORT_GPU_ENABLED` | `1` | Set to `0` to skip NVIDIA GPU collection |
+| `REPORT_GPU_ENABLED` | `1` | Set to `0` to skip GPU collection |
 | `REPORT_GPU_TIMEOUT` | `1` | Timeout in seconds for one `nvidia-smi` call; `0` disables the limit |
 | `REPORT_SMART_ENABLED` | `1` | Set to `0` to skip SMART collection |
 | `REPORT_SMART_TIMEOUT` | `2` | SMART timeout in seconds per disk; `0` disables the limit |
+| `REPORT_NTP_ENABLED` | `1` | Set to `0` to skip NTP collection |
+| `REPORT_NTP_TIMEOUT` | `1` | macOS `sntp` query timeout in seconds; `0` disables the limit |
 | `NO_COLOR` | Unset | Disable ANSI colors when set |
 | `FORCE_COLOR` | Unset | Keep colors even when output is piped |
 | `REPORT_TITLE` | `SERVER OPERATION REPORT` | Cover title; set to an empty string to hide it |
@@ -59,7 +62,8 @@ Common examples:
 
 ```bash
 REPORT_MOCK_ENABLED=1 mreport        # use built-in demo data
-REPORT_GPU_ENABLED=0 mreport         # skip NVIDIA GPU queries
+REPORT_GPU_ENABLED=0 mreport         # skip GPU queries
+REPORT_NTP_ENABLED=0 mreport         # skip NTP synchronization queries
 NO_COLOR=1 mreport                   # disable ANSI colors
 REPORT_PROFILE=1 mreport             # show stage timings
 ```
@@ -109,7 +113,13 @@ Required at runtime:
 
 Complete Linux collection also relies on `/proc`, `/sys`, util-linux, iproute2,
 and coreutils. macOS works with the default system environment; Apple Silicon
-GPU information is read through built-in system tools.
+GPU utilization and unified-memory usage are read through built-in `ioreg`
+statistics. Apple Silicon CPU frequency shows P/E groups with vCPU counts and
+DVFS ranges from `ioreg`; the live clock is not exposed without elevated
+privileges. On Linux hybrid CPUs, each cpufreq min/max group is shown with its
+vCPU count and threads per core when `lscpu -e` exposes them. Frequency tiers
+follow a `SUM CORES` row and global load averages, grouped under each
+`CPU Socket`.
 
 Recommended for complete collection:
 
@@ -129,6 +139,8 @@ Other optional tools degrade individual fields when missing:
 | `systemd-detect-virt` | Virtualization type | Falls back to DMI information |
 | `timedatectl` | IANA time zone name | Falls back to `/etc/timezone` or `/etc/localtime` |
 | `resolvectl` | Upstream DNS servers | Falls back to `/etc/resolv.conf` |
+| `chronyc` / `timedatectl` / `ntpq` / `ntpstat` | Linux NTP status, server, and offset | Uses the next available NTP tool |
+| `sntp` | macOS clock offset and resolved server address | Status/server come from `systemsetup` when available; offset shows `-` |
 
 Install dependencies by distribution:
 
@@ -170,6 +182,26 @@ permissions or tools, a disk in standby, or a device that does not expose it.
 It does not necessarily indicate a disk failure. Reading SMART on Linux usually
 requires root; USB enclosures and virtual disks may not provide SMART data.
 
+### NTP Fields
+
+```text
+NTP STATUS │ ●SYNCED
+NTP SERVER │ time.cloudflare.com (162.159.200.1)
+NTP OFFSET │ +0.284 ms
+```
+
+| Field | Meaning |
+| --- | --- |
+| `STATUS` | `SYNCED` means the time service reports a valid synchronization; `UNSYNCED` means it is running but not synchronized; `DISABLED` means collection is turned off; `UNKNOWN` means no supported tool could determine the state |
+| `SERVER` | Active or configured NTP server; `-` when it was not reported |
+| `OFFSET` | Clock difference reported by the active NTP tool, converted to milliseconds; the sign convention follows that tool; `-` when unavailable |
+
+Linux uses the first available source that returns usable data from `chronyc`,
+`timedatectl`, `ntpq`, and `ntpstat`, then falls back to configuration files
+and the `timedatectl` synchronization flag. macOS reads `systemsetup` when
+accessible and uses `sntp` for the offset. NTP details degrade independently
+and never interrupt the rest of the report.
+
 ## FAQ
 
 **The report is slow.** Run `REPORT_PROFILE=1 mreport >/dev/null` to inspect
@@ -179,6 +211,12 @@ stage timings. GPU or SMART probing is usually responsible; set
 **Fields show `N/A`, `-`, or `UNKNOWN`.** The corresponding tool is missing,
 permissions are insufficient, or the platform does not provide the data. The
 report continues to render normally.
+
+**NTP status is `UNKNOWN`, `UNSYNCED`, or `DISABLED`.** `DISABLED` means
+`REPORT_NTP_ENABLED=0`. `UNKNOWN` means no supported time-sync tool returned a
+usable answer. `UNSYNCED` means the tool responded but the clock has no valid
+synchronization; check the time service, upstream server, and network. On
+macOS, the offset also requires `sntp` and an allowed NTP query.
 
 ## Development
 

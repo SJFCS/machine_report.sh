@@ -3,7 +3,8 @@
 [English](README.md) | 简体中文
 
 在终端快速查看服务器运行状态。一次运行输出系统、CPU/负载、GPU、内存、
-磁盘/SMART、网络和 DNS；工具缺失或权限不足时自动降级，不会中断报告。
+磁盘/SMART、网络、DNS，以及 NTP 同步状态、同步地址和时钟偏移；工具缺失
+或权限不足时自动降级，不会中断报告。
 
 适用于 Linux 和 macOS。它是单文件 Bash 脚本，依赖 Bash 3.2+、awk 和
 Perl 5；GPU/SMART 采集建议安装 `nvidia-smi` 和 `smartmontools`。
@@ -41,10 +42,12 @@ cd machine_report.sh
 | ---------------------- | ------------------------- | ------------------------------------------ |
 | `REPORT_MOCK_ENABLED`  | `0`                       | 设为 `1` 使用内置 GPU、磁盘和标量演示数据  |
 | `REPORT_PROFILE`       | `0`                       | 设为 `1` 将各阶段耗时写入 stderr           |
-| `REPORT_GPU_ENABLED`   | `1`                       | 设为 `0` 跳过 NVIDIA GPU 采集              |
+| `REPORT_GPU_ENABLED`   | `1`                       | 设为 `0` 跳过 GPU 采集                     |
 | `REPORT_GPU_TIMEOUT`   | `1`                       | 单次 `nvidia-smi` 超时秒数；`0` 表示不限时 |
 | `REPORT_SMART_ENABLED` | `1`                       | 设为 `0` 跳过 SMART 采集                   |
 | `REPORT_SMART_TIMEOUT` | `2`                       | 单块磁盘 SMART 超时秒数；`0` 表示不限时    |
+| `REPORT_NTP_ENABLED`   | `1`                       | 设为 `0` 跳过 NTP 采集                     |
+| `REPORT_NTP_TIMEOUT`   | `1`                       | macOS `sntp` 查询超时秒数；`0` 表示不限时  |
 | `NO_COLOR`             | 未设置                    | 设置后关闭颜色                             |
 | `FORCE_COLOR`          | 未设置                    | 设置后即使输出到管道也保留颜色             |
 | `REPORT_TITLE`         | `SERVER OPERATION REPORT` | 封面标题；传空串可隐藏                     |
@@ -53,7 +56,8 @@ cd machine_report.sh
 
 ```bash
 REPORT_MOCK_ENABLED=1 mreport        # 使用内置演示数据
-REPORT_GPU_ENABLED=0 mreport         # 跳过 NVIDIA GPU 查询
+REPORT_GPU_ENABLED=0 mreport         # 跳过 GPU 查询
+REPORT_NTP_ENABLED=0 mreport         # 跳过 NTP 同步查询
 NO_COLOR=1 mreport                   # 关闭 ANSI 颜色
 REPORT_PROFILE=1 mreport             # 查看各阶段耗时
 ```
@@ -100,7 +104,11 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SJFCS/machine_report.sh
 | 基础工具 | `sed`、`tr`、`date`、`uname`、`hostname`、`who`、`df` 等 | 系统信息采集和安装                        |
 
 Linux 完整采集还依赖 `/proc`、`/sys`、util-linux、iproute2 和 coreutils。
-macOS 默认环境即可运行，Apple Silicon 的 GPU 信息由系统内置工具读取。
+macOS 默认环境即可运行，Apple Silicon 的 GPU 利用率和统一内存占用来自
+系统内置的 `ioreg` 统计；CPU 频率按 P/E 分组显示 vCPU 数和 DVFS 区间，
+实时主频需要提权后才能读取。Linux 异构 CPU 在 `lscpu -e` 和 cpufreq
+提供数据时，会按实际 min/max 频率档显示 vCPU 数和每核线程数。各频率档
+前先显示 `SUM CORES` 汇总和全局负载，再按对应的 `CPU Socket` 分组。
 
 完整采集建议安装：
 
@@ -120,6 +128,8 @@ macOS 默认环境即可运行，Apple Silicon 的 GPU 信息由系统内置工�
 | `systemd-detect-virt` | 虚拟化类型                   | 回退 DMI 信息                            |
 | `timedatectl`         | IANA 时区名称                | 回退 `/etc/timezone` 或 `/etc/localtime` |
 | `resolvectl`          | 上游 DNS                     | 回退读取 `/etc/resolv.conf`              |
+| `chronyc` / `timedatectl` / `ntpq` / `ntpstat` | Linux NTP 状态、地址和偏移 | 自动尝试下一个可用的 NTP 工具 |
+| `sntp`                | macOS 时钟偏移和解析后的服务器地址 | 有 `systemsetup` 时仍显示状态/地址；偏移显示 `-` |
 
 常见发行版安装：
 
@@ -159,6 +169,25 @@ SMART │ HEALTH PASSED · WEAR 4% · CRC 0
 暴露该指标，不代表磁盘一定故障。Linux 读取 SMART 通常需要 root；
 USB 转接盒和虚拟磁盘也可能不提供 SMART 数据。
 
+### NTP 字段
+
+```text
+NTP STATUS │ ●SYNCED
+NTP SERVER │ time.cloudflare.com (162.159.200.1)
+NTP OFFSET │ +0.284 ms
+```
+
+| 字段       | 含义                                                         |
+| ---------- | ------------------------------------------------------------ |
+| `STATUS`   | `SYNCED` 表示时间服务已正常同步；`UNSYNCED` 表示服务在运行但未同步；`DISABLED` 表示已关闭采集；`UNKNOWN` 表示没有可用工具能判断状态 |
+| `SERVER`   | 当前使用或配置的 NTP 服务器；未获取到时显示 `-`              |
+| `OFFSET`   | 当前 NTP 工具报告的时钟偏移，统一换算为毫秒；正负方向沿用该工具的定义；不可用时显示 `-` |
+
+Linux 会依次尝试 `chronyc`、`timedatectl`、`ntpq`、`ntpstat`，取第一个
+返回有效数据的来源，再回退到配置文件和 `timedatectl` 的同步标志。macOS
+在可访问时读取 `systemsetup`，并通过 `sntp` 获取偏移。NTP 信息独立降级，
+不会影响报告的其他部分。
+
 ## 常见问题
 
 **运行很慢**：先用 `REPORT_PROFILE=1 mreport >/dev/null` 查看阶段耗时。
@@ -167,6 +196,11 @@ USB 转接盒和虚拟磁盘也可能不提供 SMART 数据。
 
 **字段显示 `N/A`、`-` 或 `UNKNOWN`**：对应工具缺失、权限不足，或平台
 不提供该数据。报告会继续渲染，不需要额外处理。
+
+**NTP 状态显示 `UNKNOWN`、`UNSYNCED` 或 `DISABLED`**：`DISABLED` 表示
+设置了 `REPORT_NTP_ENABLED=0`；`UNKNOWN` 表示没有支持的时间同步工具返回
+可用结果；`UNSYNCED` 表示工具已响应，但时钟尚未建立有效同步，请检查时间
+服务、上游服务器和网络。macOS 的偏移还需要 `sntp` 且允许发起 NTP 查询。
 
 ## 开发
 

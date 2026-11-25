@@ -272,6 +272,335 @@ collect_dns_servers() {
     '
 }
 
+# ── [HANDLER] NTP 同步状态 ─────────────────────────────────────────────
+
+# [FORMAT] format_ntp_offset VALUE UNIT -> 带符号的毫秒文本。
+# UNIT 支持 s / ms / us / ns；非法数值或单位返回 "-"。
+format_ntp_offset() {
+    local value=${1-} unit=${2:-ms}
+    is_number "$value" || {
+        printf '%s' '-'
+        return 0
+    }
+    case $unit in
+        s|ms|us|ns) ;;
+        *) unit=ms ;;
+    esac
+    LC_ALL=C awk -v value="$value" -v unit="$unit" '
+        BEGIN {
+            if (unit == "s") value *= 1000
+            else if (unit == "us") value /= 1000
+            else if (unit == "ns") value /= 1000000
+            if (value > -0.0005 && value < 0) value = 0
+            printf "%+.3f ms", value
+        }
+    '
+}
+
+_ntp_clean_value() {
+    local value=${1-}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    printf '%s' "$value"
+}
+
+_ntp_server_value() {
+    local value first
+    value=$(_ntp_clean_value "${1-}")
+    first=${value%% *}
+    case $first in
+        00000000|0.0.0.0|'::') value='-' ;;
+    esac
+    [ -n "$value" ] || value='-'
+    printf '%s' "$value"
+}
+
+# [HANDLER] _ntp_reference_value VALUE -> chronyc 的服务器地址。
+# Reference ID 可能是哈希；括号内才是实际服务器，不能直接显示哈希。
+_ntp_reference_value() {
+    local value host
+    value=$(_ntp_clean_value "${1-}")
+    case $value in
+        *'('*')'*)
+            host=${value#*\(}
+            host=${host%%)*}
+            host=$(_ntp_clean_value "$host")
+            case $host in
+                ''|00000000|0.0.0.0|'::') ;;
+                *)
+                    printf '%s' "$host"
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    _ntp_server_value "$value"
+}
+
+# [HANDLER] _ntp_from_chronyc -> chronyc tracking 的状态、服务器和偏移。
+_ntp_from_chronyc() {
+    command -v chronyc >/dev/null 2>&1 || return 1
+    local raw key value server='-' offset='-' offset_value='' leap='' found=0
+    raw=$(chronyc tracking 2>/dev/null) || true
+    [ -n "$raw" ] || return 1
+    while IFS=: read -r key value; do
+        key=${key//[[:space:]]/}
+        value=$(_ntp_clean_value "$value")
+        case $key in
+            ReferenceID)
+                server=$(_ntp_reference_value "$value")
+                found=1
+                ;;
+            Systemtime)
+                offset_value=${value%% *}
+                case $value in
+                    *slow*)
+                        [[ $offset_value == -* ]] ||
+                            offset_value="-$offset_value"
+                        ;;
+                esac
+                offset=$(format_ntp_offset "$offset_value" s)
+                found=1
+                ;;
+            Leapstatus)
+                leap=$value
+                found=1
+                ;;
+        esac
+    done <<<"$raw"
+    (( found == 1 )) || return 1
+    local status='UNKNOWN'
+    case $leap in
+        Normal|normal) status='SYNCED' ;;
+        '')
+            [ "$server" != '-' ] && status='SYNCED'
+            ;;
+        *) status='UNSYNCED' ;;
+    esac
+    printf '%s\t%s\t%s\n' "$status" "$server" "$offset"
+}
+
+# [HANDLER] _ntp_from_timesyncd -> systemd-timesyncd 的状态、服务器和偏移。
+_ntp_from_timesyncd() {
+    command -v timedatectl >/dev/null 2>&1 || return 1
+    local raw key value server='-' offset='-' leap='' found=0
+    local offset_value='' unit='s'
+    raw=$(timedatectl timesync-status 2>/dev/null) || true
+    [ -n "$raw" ] || return 1
+    while IFS=: read -r key value; do
+        key=${key//[[:space:]]/}
+        value=$(_ntp_clean_value "$value")
+        case $key in
+            Server)
+                server=$(_ntp_server_value "$value")
+                found=1
+                ;;
+            Leap)
+                leap=$value
+                found=1
+                ;;
+            Offset)
+                offset_value=$value
+                unit='s'
+                case $value in
+                    *ms) offset_value=${value%ms}; unit=ms ;;
+                    *us) offset_value=${value%us}; unit=us ;;
+                    *µs) offset_value=${value%µs}; unit=us ;;
+                    *ns) offset_value=${value%ns}; unit=ns ;;
+                    *s) offset_value=${value%s}; unit=s ;;
+                esac
+                offset=$(format_ntp_offset "$offset_value" "$unit")
+                found=1
+                ;;
+        esac
+    done <<<"$raw"
+    (( found == 1 )) || return 1
+    local status='UNKNOWN'
+    case $leap in
+        normal|Normal) status='SYNCED' ;;
+        '')
+            [ "$server" != '-' ] && status='SYNCED'
+            ;;
+        *) status='UNSYNCED' ;;
+    esac
+    printf '%s\t%s\t%s\n' "$status" "$server" "$offset"
+}
+
+# [HANDLER] _ntp_from_ntpq -> ntpq 中带 * 的当前同步 peer。
+_ntp_from_ntpq() {
+    command -v ntpq >/dev/null 2>&1 || return 1
+    local raw selected peer offset_value server='-' offset='-'
+    raw=$(ntpq -pn 2>/dev/null) || true
+    [ -n "$raw" ] || return 1
+    selected=$(printf '%s\n' "$raw" |
+        awk '$1 ~ /^\*/ { print $1 "\t" $9; exit }')
+    if [ -n "$selected" ]; then
+        IFS=$'\t' read -r peer offset_value <<<"$selected"
+        server=${peer#\*}
+        offset=$(format_ntp_offset "$offset_value" ms)
+        printf 'SYNCED\t%s\t%s\n' "$server" "$offset"
+    else
+        printf 'UNSYNCED\t-\t-\n'
+    fi
+}
+
+# [HANDLER] _ntp_from_ntpstat -> ntpstat 的同步状态和服务器。
+_ntp_from_ntpstat() {
+    command -v ntpstat >/dev/null 2>&1 || return 1
+    local raw server='-'
+    raw=$(ntpstat 2>/dev/null) || true
+    [ -n "$raw" ] || return 1
+    case $raw in
+        *synchronised*|*synchronized*)
+            server=${raw#*\(}
+            if [ "$server" != "$raw" ]; then
+                server=${server%%)*}
+            else
+                server='-'
+            fi
+            printf 'SYNCED\t%s\t-\n' "$server"
+            ;;
+        *)
+            printf 'UNSYNCED\t-\t-\n'
+            ;;
+    esac
+}
+
+_ntp_config_server() {
+    local file keyword host rest=''
+    for file in /etc/chrony.conf /etc/chrony/chrony.conf /etc/ntp.conf; do
+        [ -r "$file" ] || continue
+        while IFS=' ' read -r keyword host rest; do
+            case $keyword in
+                server|pool|peer)
+                    [ -n "$host" ] && {
+                        printf '%s' "$host"
+                        return 0
+                    }
+                    ;;
+            esac
+        done <"$file"
+    done
+    if [ -r /etc/systemd/timesyncd.conf ]; then
+        host=$(awk -F= '$1 == "NTP" && $2 != "" {
+            split($2, values, " ")
+            print values[1]
+            exit
+        }' /etc/systemd/timesyncd.conf 2>/dev/null)
+        [ -n "$host" ] && {
+            printf '%s' "$host"
+            return 0
+        }
+    fi
+    printf '%s' '-'
+}
+
+collect_ntp_info_linux() {
+    local result='' status='UNKNOWN' server='-' offset='-' sync=''
+    result=$(_ntp_from_chronyc) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_timesyncd) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_ntpq) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_ntpstat) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+
+    if command -v timedatectl >/dev/null 2>&1; then
+        sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null) || true
+        case $sync in
+            yes|true|1) status='SYNCED' ;;
+            no|false|0) status='UNSYNCED' ;;
+        esac
+    fi
+    server=$(_ntp_config_server)
+    printf '%s\t%s\t%s\n' "$status" "$server" "$offset"
+}
+
+collect_ntp_info_darwin() {
+    local result='' status='UNKNOWN' server='-' offset='-'
+    local raw='' offset_value='' sntp_host='' sntp_ip='' in_sync=''
+    result=$(_ntp_from_chronyc) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_ntpq) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_ntpstat) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+
+    if command -v systemsetup >/dev/null 2>&1; then
+        raw=$(systemsetup -getusingnetworktime 2>/dev/null) || true
+        case $raw in
+            *"Network Time: Off"*) status='DISABLED' ;;
+        esac
+        raw=$(systemsetup -getnetworktimeserver 2>/dev/null) || true
+        case $raw in
+            *"Network Time Server:"*)
+                raw=${raw#*Network Time Server:}
+                server=$(_ntp_server_value "$raw")
+                ;;
+        esac
+    fi
+    [ "$server" != '-' ] || server=$(_ntp_config_server)
+
+    if [ "$status" != 'DISABLED' ] && [ "$server" != '-' ] &&
+        command -v sntp >/dev/null 2>&1; then
+        if (( REPORT_NTP_TIMEOUT > 0 )); then
+            raw=$(sntp -t "$REPORT_NTP_TIMEOUT" -n 1 "$server" 2>/dev/null) || true
+        else
+            raw=$(sntp -n 1 "$server" 2>/dev/null) || true
+        fi
+        IFS=' ' read -r offset_value _ _ sntp_host sntp_ip _ <<<"$raw"
+        if is_number "$offset_value"; then
+            offset=$(format_ntp_offset "$offset_value" s)
+            [ -n "$sntp_host" ] && [ -n "$sntp_ip" ] &&
+                server="$sntp_host ($sntp_ip)"
+            in_sync=$(LC_ALL=C awk -v value="$offset_value" '
+                BEGIN {
+                    if (value < 0) value = -value
+                    print (value <= 1) ? 1 : 0
+                }
+            ')
+            if [ "$in_sync" = 1 ]; then
+                status='SYNCED'
+            else
+                status='UNSYNCED'
+            fi
+        fi
+    fi
+    printf '%s\t%s\t%s\n' "$status" "$server" "$offset"
+}
+
+collect_ntp_info() {
+    if (( REPORT_NTP_ENABLED == 0 )); then
+        printf 'DISABLED\t-\t-\n'
+    elif [ "$platform_name" = Darwin ]; then
+        collect_ntp_info_darwin
+    else
+        collect_ntp_info_linux
+    fi
+}
+
 # [STAGE] collect_platform_session -> 厂商/型号/UUID 与 locale/时区/登录信息。
 collect_platform_session() {
     _profile_begin 'platform'
@@ -290,6 +619,21 @@ collect_platform_session() {
     timezone_name=$(detect_timezone)
     login_user=$(detect_login_user)
     login_client=$(detect_login_client)
+    _profile_end
+    _profile_begin 'ntp'
+    if (( REPORT_MOCK_ENABLED == 1 )); then
+        if (( REPORT_NTP_ENABLED == 0 )); then
+            ntp_status='DISABLED'
+            ntp_server='-'
+            ntp_offset='-'
+        fi
+    else
+        ntp_status='UNKNOWN'
+        ntp_server='-'
+        ntp_offset='-'
+        IFS=$'\t' read -r ntp_status ntp_server ntp_offset \
+            < <(collect_ntp_info)
+    fi
     _profile_end
 }
 

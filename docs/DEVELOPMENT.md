@@ -30,7 +30,7 @@ build.sh      按 core → sources → handlers → main 合并成 machine_repor
 
 ```md
 collect_shared_scalars()                              # OS/CPU/负载/内存等共享标量
-collect_platform_session()                            # 厂商/型号/UUID/locale/时区/登录信息
+collect_platform_session()                            # 厂商/型号/UUID/locale/时区/登录信息/NTP
 for h in "${MR_HANDLERS[@]}"; do handler_$h; done     # 追加字段行
 measure_fields()                                      # 计算 NAME_W / DATA_W
 handler_xxx_measure()                                 # 可选：撑宽 DATA_W
@@ -104,6 +104,7 @@ mr_register xxx                               # 注册；顺序即渲染顺序
 ./build.sh /tmp/x.sh                        # 构建到临时路径（调试）
 REPORT_MOCK_ENABLED=1 ./machine_report.sh   # 演示数据，输出可复现
 REPORT_PROFILE=1 ./machine_report.sh >/dev/null   # 分阶段耗时（stderr）
+REPORT_NTP_ENABLED=0 ./machine_report.sh    # 跳过 NTP 查询
 ./install.sh --source ./machine_report.sh   # 安装到 ~/.local，注册 mreport
 ```
 
@@ -343,7 +344,8 @@ mr_register extras
 | `DATA_MAX` / `NAME_MAX`                                                                  | 列宽上限，超长字段名会被截断                  |
 | `C_*`                                                                                    | ANSI 颜色，见 `core/00-bootstrap.sh`          |
 | `HORIZONTAL` / `DASHED_HORIZONTAL` / `TOP_LEFT` …                                        | 边框字符                                      |
-| `REPORT_MOCK_ENABLED` / `REPORT_PROFILE` / `REPORT_GPU_ENABLED` / `REPORT_SMART_ENABLED` | 运行开关                                      |
+| `REPORT_MOCK_ENABLED` / `REPORT_PROFILE` / `REPORT_GPU_ENABLED` / `REPORT_SMART_ENABLED` / `REPORT_NTP_ENABLED` | 运行开关 |
+| `REPORT_GPU_TIMEOUT` / `REPORT_SMART_TIMEOUT` / `REPORT_NTP_TIMEOUT` | 外部命令超时秒数；`0` 表示不限时 |
 
 ## 改标题与页脚
 
@@ -370,7 +372,7 @@ mr_cover_line "${C_TITLE}${REPORT_TITLE}${C_RESET}"
 | 文件          | 提供                                                 |
 | ------------- | ---------------------------------------------------- |
 | `system.sh`   | mock 标量、OS、CPU、负载、运行时间、内存             |
-| `platform.sh` | 厂商/型号/UUID、locale/时区/登录用户、网卡、DNS      |
+| `platform.sh` | 厂商/型号/UUID、locale/时区/登录用户、网卡、DNS、NTP |
 | `gpu-disk.sh` | `collect_gpu_rows`、`physical_disk_rows`、SMART 解析 |
 
 约定：
@@ -391,6 +393,15 @@ physical_disk_rows() {
 
 新增数据源时，建议单独成文件、函数名用 `collect_*` / `detect_*`，
 handler 里直接调用，例如 `rows=$(collect_xxx)`。
+
+NTP 采集由 `collect_ntp_info` 输出
+`STATUS<TAB>SERVER<TAB>OFFSET`，状态取 `SYNCED`、`UNSYNCED`、
+`DISABLED` 或 `UNKNOWN`；偏移已格式化为毫秒文本。
+`collect_platform_session` 将其读入 `ntp_status`、`ntp_server`、
+`ntp_offset`。Linux 依次尝试 `chronyc`、`timedatectl`、`ntpq`、
+`ntpstat`，最后回退到配置文件与 `timedatectl` 同步标志；macOS 使用
+`systemsetup` 和 `sntp`。新增来源时必须保留该 TSV 契约，并让缺失工具
+降级为 `UNKNOWN` 或 `-`，不能中断报告。
 
 ## 编码约定
 

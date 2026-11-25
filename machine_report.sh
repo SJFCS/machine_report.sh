@@ -52,6 +52,8 @@
 #      等待时，信号也可能延迟生效；需要稳定速度时应直接跳过 GPU。
 # SMART：需要 smartmontools 的 smartctl。REPORT_SMART_ENABLED=0 跳过采集；
 #        REPORT_SMART_TIMEOUT 控制单块磁盘超时秒数（默认 2，0 表示不限制）。
+# NTP：REPORT_NTP_ENABLED=0 跳过同步状态采集；REPORT_NTP_TIMEOUT 控制
+#       macOS sntp 查询超时秒数（默认 1，0 表示不限制）。
 # 数据：REPORT_MOCK_ENABLED=0（默认）关闭 mock，=1 开启完整演示数据；
 #
 # ── 函数索引（内核开发用） ──────────────────────────────────────────────
@@ -134,6 +136,8 @@ _report_parse_bool REPORT_GPU_ENABLED "${REPORT_GPU_ENABLED:-1}" || exit $?
 _report_parse_seconds REPORT_GPU_TIMEOUT "${REPORT_GPU_TIMEOUT:-1}" || exit $?
 _report_parse_bool REPORT_SMART_ENABLED "${REPORT_SMART_ENABLED:-1}" || exit $?
 _report_parse_seconds REPORT_SMART_TIMEOUT "${REPORT_SMART_TIMEOUT:-2}" || exit $?
+_report_parse_bool REPORT_NTP_ENABLED "${REPORT_NTP_ENABLED:-1}" || exit $?
+_report_parse_seconds REPORT_NTP_TIMEOUT "${REPORT_NTP_TIMEOUT:-1}" || exit $?
 
 # 计时器
 _profile_now_into() {
@@ -1675,6 +1679,7 @@ render_report() {
     print_merged_divider "$BOTTOM_LEFT" "$BOTTOM_RIGHT"
 }
 
+
 # ── [HANDLER / MOCK] GPU ───────────────────────────────────────────────
 
 # [MOCK] demo_gpu_rows -> 两块 A100 的 GPU 演示 TSV。
@@ -1696,23 +1701,34 @@ collect_macos_gpu_rows() {
 
     raw=$(ioreg -r -c AGXAccelerator -d 1 2>/dev/null)
     if [ -n "$raw" ]; then
-        # 四组字段来自同一份 ioreg 输出，合成一次 awk 解析，
-        # 避免为 model/cores/util/used 各起一条 sed + head 管道。
+        # 四组字段来自同一份 ioreg 输出，合成一次 awk 解析。
+        # 新版 macOS 会把 PerformanceStatistics 整个字典压在同一行，
+        # 因此逐个扫描引号字段，不能假定每个键独占一行。
         IFS=$'\t' read -r model cores util used_bytes < <(
             printf '%s\n' "$raw" | awk -F'"' '
-                function field_value(   value) {
-                    value = $4
-                    if (value == "") {
-                        value = $3
+                function field_value_at(i,   value) {
+                    value = $(i + 1)
+                    if (value ~ /^[[:space:]]*=[[:space:]]*[0-9]/) {
                         sub(/^[^0-9]*/, "", value)
                         sub(/[^0-9].*$/, "", value)
+                        return value
                     }
+                    value = $(i + 2)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
                     return value
                 }
-                $2 == "model" && model == "" { model = field_value() }
-                $2 == "gpu-core-count" && cores == "" { cores = field_value() }
-                $2 == "Device Utilization %" && util == "" { util = field_value() }
-                $2 == "In use system memory" && used == "" { used = field_value() }
+                {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == "model" && model == "")
+                            model = field_value_at(i)
+                        if ($i == "gpu-core-count" && cores == "")
+                            cores = field_value_at(i)
+                        if ($i == "Device Utilization %" && util == "")
+                            util = field_value_at(i)
+                        if ($i == "In use system memory" && used == "")
+                            used = field_value_at(i)
+                    }
+                }
                 END { print model "\t" cores "\t" util "\t" used }
             '
         )
@@ -2628,6 +2644,335 @@ collect_dns_servers() {
     '
 }
 
+# ── [HANDLER] NTP 同步状态 ─────────────────────────────────────────────
+
+# [FORMAT] format_ntp_offset VALUE UNIT -> 带符号的毫秒文本。
+# UNIT 支持 s / ms / us / ns；非法数值或单位返回 "-"。
+format_ntp_offset() {
+    local value=${1-} unit=${2:-ms}
+    is_number "$value" || {
+        printf '%s' '-'
+        return 0
+    }
+    case $unit in
+        s|ms|us|ns) ;;
+        *) unit=ms ;;
+    esac
+    LC_ALL=C awk -v value="$value" -v unit="$unit" '
+        BEGIN {
+            if (unit == "s") value *= 1000
+            else if (unit == "us") value /= 1000
+            else if (unit == "ns") value /= 1000000
+            if (value > -0.0005 && value < 0) value = 0
+            printf "%+.3f ms", value
+        }
+    '
+}
+
+_ntp_clean_value() {
+    local value=${1-}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    printf '%s' "$value"
+}
+
+_ntp_server_value() {
+    local value first
+    value=$(_ntp_clean_value "${1-}")
+    first=${value%% *}
+    case $first in
+        00000000|0.0.0.0|'::') value='-' ;;
+    esac
+    [ -n "$value" ] || value='-'
+    printf '%s' "$value"
+}
+
+# [HANDLER] _ntp_reference_value VALUE -> chronyc 的服务器地址。
+# Reference ID 可能是哈希；括号内才是实际服务器，不能直接显示哈希。
+_ntp_reference_value() {
+    local value host
+    value=$(_ntp_clean_value "${1-}")
+    case $value in
+        *'('*')'*)
+            host=${value#*\(}
+            host=${host%%)*}
+            host=$(_ntp_clean_value "$host")
+            case $host in
+                ''|00000000|0.0.0.0|'::') ;;
+                *)
+                    printf '%s' "$host"
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    _ntp_server_value "$value"
+}
+
+# [HANDLER] _ntp_from_chronyc -> chronyc tracking 的状态、服务器和偏移。
+_ntp_from_chronyc() {
+    command -v chronyc >/dev/null 2>&1 || return 1
+    local raw key value server='-' offset='-' offset_value='' leap='' found=0
+    raw=$(chronyc tracking 2>/dev/null) || true
+    [ -n "$raw" ] || return 1
+    while IFS=: read -r key value; do
+        key=${key//[[:space:]]/}
+        value=$(_ntp_clean_value "$value")
+        case $key in
+            ReferenceID)
+                server=$(_ntp_reference_value "$value")
+                found=1
+                ;;
+            Systemtime)
+                offset_value=${value%% *}
+                case $value in
+                    *slow*)
+                        [[ $offset_value == -* ]] ||
+                            offset_value="-$offset_value"
+                        ;;
+                esac
+                offset=$(format_ntp_offset "$offset_value" s)
+                found=1
+                ;;
+            Leapstatus)
+                leap=$value
+                found=1
+                ;;
+        esac
+    done <<<"$raw"
+    (( found == 1 )) || return 1
+    local status='UNKNOWN'
+    case $leap in
+        Normal|normal) status='SYNCED' ;;
+        '')
+            [ "$server" != '-' ] && status='SYNCED'
+            ;;
+        *) status='UNSYNCED' ;;
+    esac
+    printf '%s\t%s\t%s\n' "$status" "$server" "$offset"
+}
+
+# [HANDLER] _ntp_from_timesyncd -> systemd-timesyncd 的状态、服务器和偏移。
+_ntp_from_timesyncd() {
+    command -v timedatectl >/dev/null 2>&1 || return 1
+    local raw key value server='-' offset='-' leap='' found=0
+    local offset_value='' unit='s'
+    raw=$(timedatectl timesync-status 2>/dev/null) || true
+    [ -n "$raw" ] || return 1
+    while IFS=: read -r key value; do
+        key=${key//[[:space:]]/}
+        value=$(_ntp_clean_value "$value")
+        case $key in
+            Server)
+                server=$(_ntp_server_value "$value")
+                found=1
+                ;;
+            Leap)
+                leap=$value
+                found=1
+                ;;
+            Offset)
+                offset_value=$value
+                unit='s'
+                case $value in
+                    *ms) offset_value=${value%ms}; unit=ms ;;
+                    *us) offset_value=${value%us}; unit=us ;;
+                    *µs) offset_value=${value%µs}; unit=us ;;
+                    *ns) offset_value=${value%ns}; unit=ns ;;
+                    *s) offset_value=${value%s}; unit=s ;;
+                esac
+                offset=$(format_ntp_offset "$offset_value" "$unit")
+                found=1
+                ;;
+        esac
+    done <<<"$raw"
+    (( found == 1 )) || return 1
+    local status='UNKNOWN'
+    case $leap in
+        normal|Normal) status='SYNCED' ;;
+        '')
+            [ "$server" != '-' ] && status='SYNCED'
+            ;;
+        *) status='UNSYNCED' ;;
+    esac
+    printf '%s\t%s\t%s\n' "$status" "$server" "$offset"
+}
+
+# [HANDLER] _ntp_from_ntpq -> ntpq 中带 * 的当前同步 peer。
+_ntp_from_ntpq() {
+    command -v ntpq >/dev/null 2>&1 || return 1
+    local raw selected peer offset_value server='-' offset='-'
+    raw=$(ntpq -pn 2>/dev/null) || true
+    [ -n "$raw" ] || return 1
+    selected=$(printf '%s\n' "$raw" |
+        awk '$1 ~ /^\*/ { print $1 "\t" $9; exit }')
+    if [ -n "$selected" ]; then
+        IFS=$'\t' read -r peer offset_value <<<"$selected"
+        server=${peer#\*}
+        offset=$(format_ntp_offset "$offset_value" ms)
+        printf 'SYNCED\t%s\t%s\n' "$server" "$offset"
+    else
+        printf 'UNSYNCED\t-\t-\n'
+    fi
+}
+
+# [HANDLER] _ntp_from_ntpstat -> ntpstat 的同步状态和服务器。
+_ntp_from_ntpstat() {
+    command -v ntpstat >/dev/null 2>&1 || return 1
+    local raw server='-'
+    raw=$(ntpstat 2>/dev/null) || true
+    [ -n "$raw" ] || return 1
+    case $raw in
+        *synchronised*|*synchronized*)
+            server=${raw#*\(}
+            if [ "$server" != "$raw" ]; then
+                server=${server%%)*}
+            else
+                server='-'
+            fi
+            printf 'SYNCED\t%s\t-\n' "$server"
+            ;;
+        *)
+            printf 'UNSYNCED\t-\t-\n'
+            ;;
+    esac
+}
+
+_ntp_config_server() {
+    local file keyword host rest=''
+    for file in /etc/chrony.conf /etc/chrony/chrony.conf /etc/ntp.conf; do
+        [ -r "$file" ] || continue
+        while IFS=' ' read -r keyword host rest; do
+            case $keyword in
+                server|pool|peer)
+                    [ -n "$host" ] && {
+                        printf '%s' "$host"
+                        return 0
+                    }
+                    ;;
+            esac
+        done <"$file"
+    done
+    if [ -r /etc/systemd/timesyncd.conf ]; then
+        host=$(awk -F= '$1 == "NTP" && $2 != "" {
+            split($2, values, " ")
+            print values[1]
+            exit
+        }' /etc/systemd/timesyncd.conf 2>/dev/null)
+        [ -n "$host" ] && {
+            printf '%s' "$host"
+            return 0
+        }
+    fi
+    printf '%s' '-'
+}
+
+collect_ntp_info_linux() {
+    local result='' status='UNKNOWN' server='-' offset='-' sync=''
+    result=$(_ntp_from_chronyc) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_timesyncd) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_ntpq) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_ntpstat) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+
+    if command -v timedatectl >/dev/null 2>&1; then
+        sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null) || true
+        case $sync in
+            yes|true|1) status='SYNCED' ;;
+            no|false|0) status='UNSYNCED' ;;
+        esac
+    fi
+    server=$(_ntp_config_server)
+    printf '%s\t%s\t%s\n' "$status" "$server" "$offset"
+}
+
+collect_ntp_info_darwin() {
+    local result='' status='UNKNOWN' server='-' offset='-'
+    local raw='' offset_value='' sntp_host='' sntp_ip='' in_sync=''
+    result=$(_ntp_from_chronyc) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_ntpq) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+    result=$(_ntp_from_ntpstat) || true
+    if [ -n "$result" ]; then
+        printf '%s\n' "$result"
+        return
+    fi
+
+    if command -v systemsetup >/dev/null 2>&1; then
+        raw=$(systemsetup -getusingnetworktime 2>/dev/null) || true
+        case $raw in
+            *"Network Time: Off"*) status='DISABLED' ;;
+        esac
+        raw=$(systemsetup -getnetworktimeserver 2>/dev/null) || true
+        case $raw in
+            *"Network Time Server:"*)
+                raw=${raw#*Network Time Server:}
+                server=$(_ntp_server_value "$raw")
+                ;;
+        esac
+    fi
+    [ "$server" != '-' ] || server=$(_ntp_config_server)
+
+    if [ "$status" != 'DISABLED' ] && [ "$server" != '-' ] &&
+        command -v sntp >/dev/null 2>&1; then
+        if (( REPORT_NTP_TIMEOUT > 0 )); then
+            raw=$(sntp -t "$REPORT_NTP_TIMEOUT" -n 1 "$server" 2>/dev/null) || true
+        else
+            raw=$(sntp -n 1 "$server" 2>/dev/null) || true
+        fi
+        IFS=' ' read -r offset_value _ _ sntp_host sntp_ip _ <<<"$raw"
+        if is_number "$offset_value"; then
+            offset=$(format_ntp_offset "$offset_value" s)
+            [ -n "$sntp_host" ] && [ -n "$sntp_ip" ] &&
+                server="$sntp_host ($sntp_ip)"
+            in_sync=$(LC_ALL=C awk -v value="$offset_value" '
+                BEGIN {
+                    if (value < 0) value = -value
+                    print (value <= 1) ? 1 : 0
+                }
+            ')
+            if [ "$in_sync" = 1 ]; then
+                status='SYNCED'
+            else
+                status='UNSYNCED'
+            fi
+        fi
+    fi
+    printf '%s\t%s\t%s\n' "$status" "$server" "$offset"
+}
+
+collect_ntp_info() {
+    if (( REPORT_NTP_ENABLED == 0 )); then
+        printf 'DISABLED\t-\t-\n'
+    elif [ "$platform_name" = Darwin ]; then
+        collect_ntp_info_darwin
+    else
+        collect_ntp_info_linux
+    fi
+}
+
 # [STAGE] collect_platform_session -> 厂商/型号/UUID 与 locale/时区/登录信息。
 collect_platform_session() {
     _profile_begin 'platform'
@@ -2646,6 +2991,21 @@ collect_platform_session() {
     timezone_name=$(detect_timezone)
     login_user=$(detect_login_user)
     login_client=$(detect_login_client)
+    _profile_end
+    _profile_begin 'ntp'
+    if (( REPORT_MOCK_ENABLED == 1 )); then
+        if (( REPORT_NTP_ENABLED == 0 )); then
+            ntp_status='DISABLED'
+            ntp_server='-'
+            ntp_offset='-'
+        fi
+    else
+        ntp_status='UNKNOWN'
+        ntp_server='-'
+        ntp_offset='-'
+        IFS=$'\t' read -r ntp_status ntp_server ntp_offset \
+            < <(collect_ntp_info)
+    fi
     _profile_end
 }
 
@@ -2669,19 +3029,32 @@ collect_platform_session() {
 load_mock_scalars() {
     os_name='Ubuntu 24.04 Noble'
     kernel_version='6.8.0'
+    cpu_labels=('CPU Socket 0' '' '' '' 'CPU Socket 1' '' '')
     cpu_models=(
-        'Intel Xeon Gold 6430'
+        '12th Gen Intel(R) Core(TM) i9-12900H'
+        ''
+        ''
+        ''
         'AMD EPYC 9354'
+        ''
+        ''
     )
     cpu_freqs=(
-        '2.10–3.40 GHz'
-        '3.25–3.75 GHz'
+        '20 vCPUs 14C'
+        '· 4 vCPUs P(2T) 0.40–5.00 GHz'
+        '· 8 vCPUs P(2T) 0.40–4.90 GHz'
+        '· 8 vCPUs E(1T) 0.40–3.80 GHz'
+        '64 vCPUs 32C'
+        '· 32 vCPUs C(2T) 3.25–3.75 GHz'
+        '· 32 vCPUs C(2T) 3.10–3.55 GHz'
     )
-    cpu_cores=128
+    cpu_summary_label='SUM CORES'
+    cpu_core_summary='84 vCPUs · 46C · 6×P(2T) + 8×E(1T) + 32×C(2T) · 2 Sockets'
+    cpu_cores=84
     cpu_sockets=2
-    load1='25.60'
-    load5='12.80'
-    load15='6.40'
+    load1='16.80'
+    load5='8.40'
+    load15='4.20'
     uptime='2h 10m'
     mem_total='16'
     mem_used='13.2'
@@ -2689,6 +3062,9 @@ load_mock_scalars() {
     mem_free='3.2'
     mem_shared='0.8'
     mem_available='1.4'
+    ntp_status='SYNCED'
+    ntp_server='time.cloudflare.com (162.159.200.1)'
+    ntp_offset='+0.284 ms'
 }
 
 # 基础平台信息始终来自本机；mock 只覆盖上方标量指标。
@@ -2737,11 +3113,247 @@ cpu_frequency_text() {
     fi
 }
 
+# [SOURCE] collect_linux_hybrid_cpu_groups -> 混合架频率分组 TSV。
+# 每行：
+#   SOCKET<TAB>LOGICAL<TAB>THREADS<TAB>CORES<TAB>TYPE<TAB>MIN_MHZ<TAB>MAX_MHZ
+# 频率键来自每个物理核的 cpufreq cpuinfo min/max，不能合并不同睿频档。
+# P/E 标签由每核线程数判断；按 Socket 升序、频率降序排列。
+collect_linux_hybrid_cpu_groups() {
+    local entries=''
+    command -v lscpu >/dev/null 2>&1 || return 0
+    entries=$(LC_ALL=C lscpu \
+        -e=CPU,CORE,SOCKET,ONLINE,MAXMHZ,MINMHZ 2>/dev/null) ||
+        return 0
+    [ -n "$entries" ] || return 0
+
+    printf '%s\n' "$entries" | awk '
+        NR == 1 { next }
+        $4 != "yes" { next }
+        $5 == "-" || $6 == "-" { next }
+        {
+            key = $3 ":" $2
+            rows[key]++
+            if (key in seen) {
+                next
+            }
+            seen[key] = 1
+            socket[key] = $3 + 0
+            core_max[key] = $5 + 0
+            core_min[key] = $6 + 0
+        }
+        END {
+            for (key in seen) {
+                threads = rows[key]
+                freq_key = sprintf("%s:%.0f:%.0f",
+                    socket[key], core_min[key], core_max[key])
+                if (!(freq_key in group_cores)) {
+                    groups[++group_count] = freq_key
+                    group_socket[freq_key] = socket[key]
+                    group_threads[freq_key] = threads
+                    group_min[freq_key] = core_min[key]
+                    group_max[freq_key] = core_max[key]
+                }
+                group_cores[freq_key]++
+            }
+            if (group_count < 2) {
+                exit
+            }
+            for (i = 1; i <= group_count; i++) {
+                key = groups[i]
+                if (group_threads[key] > 1) {
+                    has_p = 1
+                } else {
+                    has_e = 1
+                }
+            }
+            if (!has_p || !has_e) {
+                exit
+            }
+            for (i = 1; i <= group_count; i++) {
+                best = ""
+                for (j = 1; j <= group_count; j++) {
+                    key = groups[j]
+                    if (key in used) {
+                        continue
+                    }
+                    if (best == "" ||
+                        group_socket[key] < group_socket[best] ||
+                        (group_socket[key] == group_socket[best] &&
+                         (group_max[key] > group_max[best] ||
+                          (group_max[key] == group_max[best] &&
+                           group_min[key] > group_min[best])))) {
+                        best = key
+                    }
+                }
+                used[best] = 1
+                threads = group_threads[best]
+                cores = group_cores[best]
+                type = threads > 1 ? "P" : "E"
+                printf "%d\t%d\t%d\t%d\t%s\t%.0f\t%.0f\n",
+                    group_socket[best], cores * threads, threads, cores, type,
+                    group_min[best], group_max[best]
+            }
+        }
+    '
+}
+
+# [HANDLER] detect_macos_sysctl_cpu_frequency_into MIN_VAR MAX_VAR -> MHz。
+# Intel Mac 通过 hw.cpufrequency* 读取；Apple Silicon 不提供这些 sysctl。
+detect_macos_sysctl_cpu_frequency_into() {
+    local __min_var=$1 __max_var=$2
+    local max_hz='' min_hz='' min_value=0 max_value=0
+
+    max_hz=$(sysctl -n hw.cpufrequency_max 2>/dev/null)
+    [ -n "$max_hz" ] || max_hz=$(sysctl -n hw.cpufrequency 2>/dev/null)
+    if [[ $max_hz =~ ^[1-9][0-9]*$ ]]; then
+        max_value=$((max_hz / 1000000))
+        min_hz=$(sysctl -n hw.cpufrequency_min 2>/dev/null)
+        if [[ $min_hz =~ ^[0-9]+$ ]]; then
+            min_value=$((min_hz / 1000000))
+        fi
+    fi
+
+    printf -v "$__min_var" '%s' "$min_value"
+    printf -v "$__max_var" '%s' "$max_value"
+}
+
+# [SOURCE] detect_macos_dvfs_ranges -> P/E 频率范围 TSV。
+# Apple Silicon 从 pmgr 的 DVFS 表读取：表内是 4 字节频率 + 4 字节电压，
+# M1-M3 用 Hz，M4 起用 kHz，旧数据可能直接用 MHz。输出：
+#   P<TAB>MIN_MHZ<TAB>MAX_MHZ
+#   E<TAB>MIN_MHZ<TAB>MAX_MHZ
+detect_macos_dvfs_ranges() {
+    ioreg -lw0 -r -n pmgr 2>/dev/null |
+        perl -e '
+            my (%lo, %hi);
+            while (<STDIN>) {
+                while (/"voltage-states(\d+)-sram" = <([0-9a-f]+)>/g) {
+                    my ($key, $bytes) = ($1, pack("H*", $2));
+                    for (my $offset = 0;
+                         $offset + 8 <= length($bytes);
+                         $offset += 8) {
+                        my $freq = unpack("V", substr($bytes, $offset, 4));
+                        next if !$freq;
+                        if ($freq >= 100_000_000) {
+                            $freq /= 1_000_000;
+                        } elsif ($freq >= 100_000) {
+                            $freq /= 1_000;
+                        }
+                        next if $freq < 100 || $freq > 10_000;
+                        if (!exists($lo{$key}) || $freq < $lo{$key}) {
+                            $lo{$key} = $freq;
+                        }
+                        if (!exists($hi{$key}) || $freq > $hi{$key}) {
+                            $hi{$key} = $freq;
+                        }
+                    }
+                }
+            }
+
+            my ($p, $e);
+            $p = 5 if exists $hi{5};
+            for my $candidate (1, 22, 23) {
+                next if !exists $hi{$candidate};
+                next if $p && $hi{$candidate} >= $hi{$p};
+                $e = $candidate if !$e || $hi{$candidate} > $hi{$e};
+            }
+
+            printf "P\t%.0f\t%.0f\n", $lo{$p}, $hi{$p} if $p;
+            printf "E\t%.0f\t%.0f\n", $lo{$e}, $hi{$e} if $e;
+        '
+}
+
+# [HANDLER] detect_macos_cpu_frequency_text -> 静态频率区间文本。
+detect_macos_cpu_frequency_text() {
+    local min_mhz=0 max_mhz=0 ranges='' label='' lo='' hi=''
+    local lo_ghz='' hi_ghz='' text=''
+
+    detect_macos_sysctl_cpu_frequency_into min_mhz max_mhz
+    if (( max_mhz > 0 )); then
+        cpu_frequency_text "$min_mhz" "$max_mhz"
+        return
+    fi
+
+    ranges=$(detect_macos_dvfs_ranges)
+    while IFS=$'\t' read -r label lo hi; do
+        [ -n "$label" ] || continue
+        _mhz_to_ghz_into lo_ghz "$lo"
+        _mhz_to_ghz_into hi_ghz "$hi"
+        [ -z "$text" ] || text+=' · '
+        text+="${label} ${lo_ghz}–${hi_ghz} GHz"
+    done <<<"$ranges"
+    printf '%s' "$text"
+}
+
+# [SOURCE] collect_macos_cpu_groups -> P/E 分组，字段与 Linux 版本一致。
+# Apple 的 perflevel0/1 分别对应 Performance/Efficiency，物理和逻辑核数
+# 由 sysctl 提供；频率范围来自 pmgr DVFS 表，不混用 GPU/ANE 表。
+collect_macos_cpu_groups() {
+    local levels='' p_phys=0 p_logical=0 e_phys=0 e_logical=0
+    local ranges='' label='' lo='' hi=''
+    local p_min=0 p_max=0 e_min=0 e_max=0 p_threads=0 e_threads=0
+
+    levels=$(sysctl -n hw.nperflevels 2>/dev/null)
+    [[ $levels =~ ^[1-9][0-9]*$ ]] || return 0
+    (( levels == 2 )) || return 0
+
+    p_phys=$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null)
+    p_logical=$(sysctl -n hw.perflevel0.logicalcpu 2>/dev/null)
+    e_phys=$(sysctl -n hw.perflevel1.physicalcpu 2>/dev/null)
+    e_logical=$(sysctl -n hw.perflevel1.logicalcpu 2>/dev/null)
+    _number_integer_into p_phys "$p_phys"
+    _number_integer_into p_logical "$p_logical"
+    _number_integer_into e_phys "$e_phys"
+    _number_integer_into e_logical "$e_logical"
+    (( p_phys > 0 && p_logical >= p_phys )) || return 0
+    (( e_phys > 0 && e_logical >= e_phys )) || return 0
+
+    ranges=$(detect_macos_dvfs_ranges)
+    while IFS=$'\t' read -r label lo hi; do
+        case $label in
+            P) p_min=$lo; p_max=$hi ;;
+            E) e_min=$lo; e_max=$hi ;;
+        esac
+    done <<<"$ranges"
+    (( p_min > 0 && p_max > 0 && e_min > 0 && e_max > 0 )) || return 0
+
+    p_threads=$((p_logical / p_phys))
+    e_threads=$((e_logical / e_phys))
+    (( p_threads > 0 && e_threads > 0 )) || return 0
+    printf '0\t%s\t%s\t%s\tP\t%s\t%s\n' \
+        "$p_logical" "$p_threads" "$p_phys" "$p_min" "$p_max"
+    printf '0\t%s\t%s\t%s\tE\t%s\t%s\n' \
+        "$e_logical" "$e_threads" "$e_phys" "$e_min" "$e_max"
+}
+
+# [SOURCE] _append_socket_cpu_rows SOCKET MODEL LOGICAL PHYSICAL GROUPS...
+# 生成一个 Socket 的表头行和若干频率档续行。
+_append_socket_cpu_rows() {
+    local socket_id=$1 model=$2 logical=$3 physical=$4 group=''
+    shift 4
+
+    cpu_labels+=("CPU Socket $socket_id")
+    cpu_models+=("$model")
+    cpu_freqs+=("${logical} vCPUs ${physical}C")
+    for group in "$@"; do
+        cpu_labels+=("")
+        cpu_models+=("")
+        cpu_freqs+=("· $group")
+    done
+}
+
 # [HANDLER] collect_cpu_scalars -> CPU 型号、频率、核心数和 Socket 数。
 collect_cpu_scalars() {
     local model='' sockets_text='' cores_text='' min_text='' max_text=''
     local sockets=1 total_cores=1 min_mhz=0 max_mhz=0 frequency='-' i
     local key value cores_per_socket=0
+    local group_rows='' g_socket='' g_logical=0 g_threads=0 g_cores=0
+    local g_min=0 g_max=0
+    local g_label='' g_min_ghz g_max_ghz
+    local current_socket='' socket_logical=0 socket_physical=0
+    local -a group_lines=()
+    local all_cores=0 p_cores=0 p_threads=0 e_cores=0 e_threads=0
+    local core_summary='' socket_word='Sockets'
     local sysctl_raw=''
 
     if [ "$platform_name" = Darwin ]; then
@@ -2752,6 +3364,8 @@ collect_cpu_scalars() {
             total_cores=${sysctl_raw#*$'\n'}
         fi
         [ -n "$model" ] || model=$(sysctl -n hw.model 2>/dev/null)
+        group_rows=$(collect_macos_cpu_groups)
+        [ -n "$group_rows" ] || frequency=$(detect_macos_cpu_frequency_text)
     else
         if command -v lscpu >/dev/null 2>&1; then
             lscpu_output=$(LC_ALL=C lscpu 2>/dev/null)
@@ -2779,6 +3393,8 @@ collect_cpu_scalars() {
         fi
         total_cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null)
         [ -n "$total_cores" ] || total_cores=$(nproc 2>/dev/null)
+        _number_integer_into min_mhz "$min_text"
+        _number_integer_into max_mhz "$max_text"
     fi
 
     [ -n "$model" ] || model='UNKNOWN'
@@ -2792,18 +3408,64 @@ collect_cpu_scalars() {
         (( cores_per_socket > 0 )) || cores_per_socket=1
         total_cores=$((sockets * cores_per_socket))
     fi
-    _number_integer_into min_mhz "$min_text"
-    _number_integer_into max_mhz "$max_text"
-    frequency=$(cpu_frequency_text "$min_mhz" "$max_mhz")
+    if [ "$platform_name" != Darwin ]; then
+        group_rows=$(collect_linux_hybrid_cpu_groups)
+        if [ -z "$group_rows" ]; then
+            frequency=$(cpu_frequency_text "$min_mhz" "$max_mhz")
+        fi
+    fi
+    [ -n "$frequency" ] || frequency='-'
 
+    cpu_labels=()
     cpu_models=()
     cpu_freqs=()
-    for ((i = 0; i < sockets; i++)); do
-        cpu_models+=("$model")
-        cpu_freqs+=("$frequency")
-    done
+    cpu_summary_label=CORES
+    if [ -n "$group_rows" ]; then
+        while IFS=$'\t' read -r \
+            g_socket g_logical g_threads g_cores g_label g_min g_max; do
+            [ -n "$g_logical" ] || continue
+            if [ -n "$current_socket" ] && [ "$g_socket" != "$current_socket" ]; then
+                _append_socket_cpu_rows "$current_socket" "$model" \
+                    "$socket_logical" "$socket_physical" "${group_lines[@]}"
+                group_lines=()
+                socket_logical=0
+                socket_physical=0
+                current_socket=$g_socket
+            elif [ -z "$current_socket" ]; then
+                current_socket=$g_socket
+            fi
+
+            _mhz_to_ghz_into g_min_ghz "$g_min"
+            _mhz_to_ghz_into g_max_ghz "$g_max"
+            if [ "$g_label" = P ]; then
+                (( p_threads > 0 )) || p_threads=$g_threads
+                p_cores=$((p_cores + g_cores))
+            else
+                e_threads=$g_threads
+                e_cores=$((e_cores + g_cores))
+            fi
+            all_cores=$((all_cores + g_cores))
+            socket_logical=$((socket_logical + g_logical))
+            socket_physical=$((socket_physical + g_cores))
+            group_lines+=("${g_logical} vCPUs ${g_label}(${g_threads}T) ${g_min_ghz}–${g_max_ghz} GHz")
+        done <<<"$group_rows"
+        if [ -n "$current_socket" ]; then
+            _append_socket_cpu_rows "$current_socket" "$model" \
+                "$socket_logical" "$socket_physical" "${group_lines[@]}"
+        fi
+        (( sockets == 1 )) && socket_word=Socket
+        cpu_summary_label='SUM CORES'
+        core_summary="${total_cores} vCPUs · ${all_cores}C · ${p_cores}×P(${p_threads}T) + ${e_cores}×E(${e_threads}T) · ${sockets} ${socket_word}"
+    else
+        for ((i = 0; i < sockets; i++)); do
+            cpu_labels+=("CPU $i")
+            cpu_models+=("$model")
+            cpu_freqs+=("$frequency")
+        done
+    fi
     cpu_cores=$total_cores
     cpu_sockets=$sockets
+    cpu_core_summary=$core_summary
 }
 
 # [HANDLER] collect_load_averages -> load1/load5/load15。
@@ -2961,7 +3623,11 @@ collect_shared_scalars() {
     [ -n "$full_hostname" ] || full_hostname='unknown'
 
     cpu_model_width=$(max_display_width "${cpu_models[@]}")
-    cores="${cpu_cores} vCPU(s) / ${cpu_sockets} Socket(s)"
+    if [ -n "${cpu_core_summary:-}" ]; then
+        cores=$cpu_core_summary
+    else
+        cores="${cpu_cores} vCPU(s) / ${cpu_sockets} Socket(s)"
+    fi
     _profile_end
 }
 #
@@ -2979,14 +3645,11 @@ REPORT_TITLE=${REPORT_TITLE-'SERVER OPERATION REPORT'}
 REPORT_SUBTITLE=${REPORT_SUBTITLE-'PVE Platform'}
 REPORT_ENVIRONMENT=${REPORT_ENVIRONMENT-'PRODUCTION'}
 
-[ -n "${REPORT_TITLE:-}" ] &&
-    mr_cover_line "${C_TITLE}${REPORT_TITLE}${C_RESET}"
-[ -n "${REPORT_SUBTITLE:-}" ] &&
-    mr_cover_line "${C_ACCENT}${REPORT_SUBTITLE}${C_RESET}"
+mr_cover_line "${C_TITLE}${REPORT_TITLE}${C_RESET}"
+mr_cover_line "${C_ACCENT}${REPORT_SUBTITLE}${C_RESET}"
 
 # 页脚：ENVIRONMENT 固定在前，SERVER/CLIENT 由 20-network.sh 追加。
-[ -n "${REPORT_ENVIRONMENT:-}" ] &&
-    mr_footer_line "${C_ENV}ENVIRONMENT · ${REPORT_ENVIRONMENT}${C_RESET}"
+mr_footer_line "${C_ENV}ENVIRONMENT · ${REPORT_ENVIRONMENT}${C_RESET}"
 #
 # ── [HANDLER] 身份与系统基本信息 ───────────────────────────────────────
 #
@@ -2995,19 +3658,31 @@ REPORT_ENVIRONMENT=${REPORT_ENVIRONMENT-'PRODUCTION'}
 # system_uuid / uptime / hostname），这里只负责排版成字段行。
 #
 # 本文件绘制的行（注释掉对应的 mr_field 就不显示）：
-#   OS / KERNEL / VIRT / LOCALE / TIMEZONE / SERVER / SYSTEM UUID / UPTIME
+#   OS / KERNEL / VIRT / LOCALE / TIMEZONE / NTP / SERVER / SYSTEM UUID / UPTIME
 #   HOSTNAME（另起一组）
+
+ntp_status_display() {
+    case ${1-} in
+        SYNCED)   printf '%s● SYNCED%s' "$C_OK" "$C_RESET" ;;
+        UNSYNCED) printf '%s● UNSYNCED%s' "$C_CRIT" "$C_RESET" ;;
+        DISABLED) printf '%s● DISABLED%s' "$C_WARN" "$C_RESET" ;;
+        *)        printf '%s● UNKNOWN%s' "$C_MUTED" "$C_RESET" ;;
+    esac
+}
 
 handler_identity() {
     mr_field        'SERVER'      "${server_manufacturer} · ${server_product_name}"
     mr_field        'SYSTEM UUID' "$system_uuid"    
     mr_field        'ARCH'        "${server_arch}"    
     mr_field        'VIRT'        "$virt_type"
-    mr_field_break        'OS'          "$os_name"
+    mr_field_break  'OS'          "$os_name"
     mr_field        'KERNEL'      "$kernel_summary"    
     mr_field        'LOCALE'      "$locale_name"
     mr_field        'TIMEZONE'    "$timezone_name"
     mr_field        'UPTIME'      "$uptime"
+    mr_field_break  'NTP STATUS'  "$(ntp_status_display "$ntp_status")"
+    mr_field        'NTP SERVER'  "${ntp_server:--}"
+    mr_field        'NTP OFFSET'  "${ntp_offset:--}"
 }
 
 mr_register identity
@@ -3018,10 +3693,12 @@ mr_register identity
 # collect_network_interfaces，再把结果交给 mr_field。
 # 页脚的 SERVER/CLIENT 行也在这里生成，因为它们依赖主 IP 和登录信息。
 #
-# 本文件绘制的行：DNS / 每个网卡一行 NIC <名字> / 页脚 SERVER、CLIENT
+# 本文件绘制的行：HOSTNAME / FULL HOSTNAME / DNS /
+# 每个网卡一行 NIC <名字> / 页脚 SERVER、CLIENT
 
 handler_network() {
     mr_field_break 'HOSTNAME' "$hostname"
+    mr_field 'FULL HOSTNAME' "$full_hostname"
 
     local nic_name='' nic_ip='' primary_ip=''
 
@@ -3051,18 +3728,12 @@ mr_register network
 # CPU 型号、核数和负载由 sources/system.sh 在 collect 阶段采集。
 # 负载条依赖列宽，所以先占位，等 handler_compute_fill 再回填。
 #
-# 本文件绘制的行：每个 Socket 一行 CPU <序号> / CORES / LOAD 1m、5m、15m
+# 本文件绘制的行：SUM CORES、LOAD 1m/5m/15m、Socket/CPU 分组行
 
 handler_compute() {
-    local i model break_before
+    local i model label value break_before
 
-    for i in "${!cpu_models[@]}"; do
-        break_before=0
-        [ "$i" -eq 0 ] && break_before=1
-        model=$(pad_display "${cpu_models[i]}" "$cpu_model_width")
-        mr_field "CPU $i" "$model · ${cpu_freqs[i]}" "$break_before"
-    done
-    mr_field 'CORES' "$cores"
+    mr_field "${cpu_summary_label:-CORES}" "$cores" 1
 
     mr_field 'LOAD 1m' ''
     LOAD_1M_ROW=$FIELD_INDEX
@@ -3070,6 +3741,24 @@ handler_compute() {
     LOAD_5M_ROW=$FIELD_INDEX
     mr_field 'LOAD 15m' ''
     LOAD_15M_ROW=$FIELD_INDEX
+
+    for i in "${!cpu_models[@]}"; do
+        break_before=0
+        [ "$i" -eq 0 ] && break_before=1
+        [ "$i" -gt 0 ] && [ -n "${cpu_models[i]}" ] && break_before=2
+        if (( i < ${#cpu_labels[@]} )); then
+            label=${cpu_labels[i]}
+        else
+            label="CPU $i"
+        fi
+        if [ -n "${cpu_models[i]}" ]; then
+            model=$(pad_display "${cpu_models[i]}" "$cpu_model_width")
+            value="$model · ${cpu_freqs[i]}"
+        else
+            value=${cpu_freqs[i]}
+        fi
+        mr_field "$label" "$value" "$break_before"
+    done
 }
 
 handler_compute_fill() {
@@ -3108,6 +3797,7 @@ handler_gpu() {
         [ -n "$gpu_name" ] || continue
         gpu_break=0
         [ "$gpu_index" -eq 0 ] && gpu_break=1
+        [ "$gpu_index" -gt 0 ] && gpu_break=2
         gpu_identity=$gpu_name
         if [[ $gpu_total =~ ^[0-9]+$ ]] && (( gpu_total > 0 )); then
             gpu_identity="$gpu_identity · $(format_mib_as_gib "$gpu_total") GiB"
@@ -3183,9 +3873,9 @@ memory_status_text() {
         fi
     fi
     case "$state" in
-        ok)   printf '%s●MEM NORMAL%s' "$C_OK" "$C_RESET" ;;
-        warn) printf '%s●MEM WARNING%s' "$C_WARN" "$C_RESET" ;;
-        *)    printf '%s●MEM CRITICAL%s' "$C_CRIT" "$C_RESET" ;;
+        ok)   printf '%s ● MEM NORMAL%s' "$C_OK" "$C_RESET" ;;
+        warn) printf '%s ● MEM WARNING%s' "$C_WARN" "$C_RESET" ;;
+        *)    printf '%s ● MEM CRITICAL%s' "$C_CRIT" "$C_RESET" ;;
     esac
 }
 
@@ -3460,82 +4150,6 @@ handler_disk_fill() {
 }
 
 mr_register disk
-#
-# 本文件绘制的行：EXAMPLE / EXAMPLE BAR
-
-handler_mything() {
-    mr_field_break 'EXAMPLE' 'hello'   # 实线：从这里开始新的一组
-
-    # 同一组的后续条目：虚线分隔
-    mr_field_dashed 'EXAMPLE 2' "$(date '+%Y-%m-%d %H:%M:%S')"
-
-    mr_field 'EXAMPLE BAR' ''
-    MY_BAR_ROW=$FIELD_INDEX            # 先占位，等列宽确定
-    
-    mr_field_break 'EXAMPLE' 'hello2'   # 实线：从这里开始新的一组
-
-}
-
-handler_mything_fill() {
-    mr_update "$MY_BAR_ROW" "$(mr_bar 42 100)"
-}
-
-mr_register mything
-
-
-
-handler_backup() {
-    mr_field_break 'BACKUP' 'rsync · nightly'
-    mr_field 'LAST RUN' '2026-11-25 03:00'
-}
-
-mr_register backup
-
-handler_misc() {
-    mr_field 'SHELL' "${SHELL##*/}"
-    mr_field 'TERM' "${TERM:-unknown}"
-}
-
-mr_register misc
-
-handler_ports() {
-    local line first=1
-    while IFS=$'\t' read -r name state; do
-        if (( first )); then
-            mr_field_break "PORT $name" "$state"
-            first=0
-        else
-            mr_field_dashed "PORT $name" "$state"
-        fi
-    done < <(printf '22\tlisten\n80\tlisten\n443\tlisten\n')
-}
-
-mr_register ports
-
-handler_diskfree() {
-    mr_field_break 'DISK FREE' ''
-    DISK_FREE_ROW=$FIELD_INDEX
-}
-
-handler_diskfree_fill() {
-    local free=58 total=100
-    mr_update "$DISK_FREE_ROW" "$(mr_bar "$free" "$total")"          # 占满 DATA_W
-    # mr_update "$DISK_FREE_ROW" "$(mr_percent_bar 58 100 58.0)"
-    # 也可以固定宽度：mr_bar "$free" "$total" 20
-}
-
-mr_register diskfree
-
-handler_extras() {
-    local uptime_text
-    uptime_text=$(uptime 2>/dev/null)
-
-    mr_field_break 'UPTIME RAW' "$(mr_fit "$uptime_text" 40)"
-    mr_field 'STATUS' "${C_OK}OK${C_RESET}"
-    mr_field 'WIDTH' "1 个中文 = $(mr_width 中) 列"
-}
-
-mr_register extras
 #
 # ── 执行入口 ───────────────────────────────────────────────────────────
 #

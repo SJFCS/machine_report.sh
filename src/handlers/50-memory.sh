@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2154
 #
 # ── [HANDLER] 内存 ─────────────────────────────────────────────────────
 #
@@ -26,9 +27,9 @@ memory_status_text() {
         fi
     fi
     case "$state" in
-        ok)   printf '%s●MEM NORMAL%s' "$C_OK" "$C_RESET" ;;
-        warn) printf '%s●MEM WARNING%s' "$C_WARN" "$C_RESET" ;;
-        *)    printf '%s●MEM CRITICAL%s' "$C_CRIT" "$C_RESET" ;;
+        ok)   printf '%s ● MEM NORMAL%s' "$C_OK" "$C_RESET" ;;
+        warn) printf '%s ● MEM WARNING%s' "$C_WARN" "$C_RESET" ;;
+        *)    printf '%s ● MEM CRITICAL%s' "$C_CRIT" "$C_RESET" ;;
     esac
 }
 

@@ -23,6 +23,7 @@ handler_gpu() {
         [ -n "$gpu_name" ] || continue
         gpu_break=0
         [ "$gpu_index" -eq 0 ] && gpu_break=1
+        [ "$gpu_index" -gt 0 ] && gpu_break=2
         gpu_identity=$gpu_name
         if [[ $gpu_total =~ ^[0-9]+$ ]] && (( gpu_total > 0 )); then
             gpu_identity="$gpu_identity · $(format_mib_as_gib "$gpu_total") GiB"
