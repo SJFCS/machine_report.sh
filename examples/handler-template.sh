@@ -11,8 +11,9 @@
 
 # 第一个钩子：采集数据并添加字段。
 handler_mything() {
-    # 普通行：mr_field '标签' '值'
-    mr_field 'EXAMPLE' 'hello'
+    # 新分组的第一行：mr_field_break 会在上方画一条实线；
+    # 只想接在上一组里则用 mr_field '标签' '值'
+    mr_field_break 'EXAMPLE' 'hello'
 
     # 新分组：mr_field_break 会在上方画一条实线
     mr_field_break 'LAST BOOT' "$(date '+%Y-%m-%d %H:%M')"

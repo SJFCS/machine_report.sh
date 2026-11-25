@@ -8,6 +8,7 @@
 - [开发文档](#开发文档)
   - [目录](#目录)
   - [一分钟了解架构](#一分钟了解架构)
+  - [构建与产物](#构建与产物)
   - [快速开始：加一个 handler](#快速开始加一个-handler)
   - [handler 契约](#handler-契约)
   - [公开 API](#公开-api)
@@ -52,21 +53,20 @@ build.sh      按 core → sources → handlers → main 合并成 machine_repor
 渲染流程：
 
 ```md
-```
-collect_shared_scalars()      # OS/CPU/负载/内存等共享标量
-collect_platform_session()    # 厂商/型号/UUID/locale/时区/登录信息
+collect_shared_scalars()                              # OS/CPU/负载/内存等共享标量
+collect_platform_session()                            # 厂商/型号/UUID/locale/时区/登录信息
 for h in "${MR_HANDLERS[@]}"; do handler_$h; done     # 追加字段行
-measure_fields()              # 计算 NAME_W / DATA_W
-handler_xxx_measure()         # 可选：撑宽 DATA_W
-handler_xxx_fill()            # 可选：回填条形图等依赖宽度的值
-render_report()               # 画边框、居中、输出
+measure_fields()                                      # 计算 NAME_W / DATA_W
+handler_xxx_measure()                                 # 可选：撑宽 DATA_W
+handler_xxx_fill()                                    # 可选：回填条形图等依赖宽度的值
+render_report()                                       # 画边框、居中、输出
 ```
 
 ## 构建与产物
 
 ```bash
 ./build.sh              # 生成 ./machine_report.sh
-./build.sh /tmp/x.sh    # 输出到指定路径（调试用）
+./build.sh /tmp/x.sh    # 输出到指定路径
 ```
 
 - `build.sh` 里的 `VERSION` 是唯一版本号来源；构建时写入产物头部。
@@ -88,7 +88,8 @@ render_report()               # 画边框、居中、输出
   # 本文件绘制的行：EXAMPLE / EXAMPLE BAR
 
   handler_mything() {
-      mr_field 'EXAMPLE' 'hello'
+      # 新分组的第一行用 mr_field_break；如果只想接在上一组里则用 mr_field
+      mr_field_break 'EXAMPLE' 'hello'
 
       mr_field 'EXAMPLE BAR' ''
       MY_BAR_ROW=$FIELD_INDEX      # 先占位，等列宽确定

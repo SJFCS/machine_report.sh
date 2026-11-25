@@ -3444,6 +3444,21 @@ handler_disk_fill() {
 
 mr_register disk
 #
+# 本文件绘制的行：EXAMPLE / EXAMPLE BAR
+
+handler_mything() {
+    mr_field 'EXAMPLE' 'hello'
+
+    mr_field 'EXAMPLE BAR' ''
+    MY_BAR_ROW=$FIELD_INDEX      # 先占位，等列宽确定
+}
+
+handler_mything_fill() {
+    mr_update "$MY_BAR_ROW" "$(mr_bar 42 100)"
+}
+
+mr_register mything
+#
 # ── 执行入口 ───────────────────────────────────────────────────────────
 #
 # 想加自己的内容，不需要改这个文件：
