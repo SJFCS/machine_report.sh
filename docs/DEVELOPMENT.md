@@ -7,9 +7,11 @@
 
 - [开发文档](#开发文档)
   - [目录](#目录)
+  - [速查表](#速查表)
   - [一分钟了解架构](#一分钟了解架构)
   - [构建与产物](#构建与产物)
   - [快速开始：加一个 handler](#快速开始加一个-handler)
+  - [例子](#例子)
   - [handler 契约](#handler-契约)
   - [公开 API](#公开-api)
     - [字段](#字段)
@@ -28,6 +30,58 @@
     - [5. mock 与真实数据](#5-mock-与真实数据)
   - [性能](#性能)
   - [测试与自检](#测试与自检)
+
+## 速查表
+
+### handler 骨架
+
+```bash
+handler_xxx()         { ... }                 # 必需：采集 + mr_field 加行
+handler_xxx_measure() { ... }                 # 可选：撑宽 DATA_W
+handler_xxx_fill()    { ... }                 # 可选：回填条形图/百分比
+mr_register xxx                               # 注册；顺序即渲染顺序
+```
+
+### 字段与封面
+
+| 函数 | 说明 |
+| --- | --- |
+| `mr_field LABEL VALUE [BREAK]` | 追加一行；`BREAK` 0/1/2 |
+| `mr_field_break LABEL VALUE` | 追加一行并在上方画实线 |
+| `mr_field_dashed LABEL VALUE` | 追加一行并在上方画虚线 |
+| `mr_update INDEX VALUE` | 回填第 `INDEX` 行（`$FIELD_INDEX`） |
+| `mr_cover_line TEXT` | 表格上方加一行居中文字 |
+| `mr_footer_line TEXT` | 表格下方加一行居中文字 |
+
+### 文本与图形
+
+| 函数 | 说明 |
+| --- | --- |
+| `mr_width TEXT` | 显示列数（中文/ANSI 安全） |
+| `mr_pad TEXT WIDTH` | 右补空格到指定显示宽度 |
+| `mr_fit TEXT WIDTH` | 超宽截断并以 `…` 结尾 |
+| `mr_bar VALUE TOTAL [WIDTH]` | 百分比条；省略 `WIDTH` 时用 `DATA_W` |
+| `mr_percent_bar VALUE TOTAL PERCENT` | 百分比条 + 右侧百分比文本 |
+
+### 分隔线
+
+| 写法 | 效果 | 场景 |
+| --- | --- | --- |
+| `mr_field 'A' 'v'` | 无分隔线 | 接在上一组里 |
+| `mr_field_break 'A' 'v'` | 上方实线 | 新的一组 |
+| `mr_field_dashed 'A' 'v'` | 上方虚线 | 同一组里的下一条 |
+| `mr_field 'A' 'v' 1` | 同 `mr_field_break` | 少写一行时用 |
+| `mr_field 'A' 'v' 2` | 同 `mr_field_dashed` | 少写一行时用 |
+
+### 常用命令
+
+```bash
+./build.sh                                  # 构建 ./machine_report.sh
+./build.sh /tmp/x.sh                        # 构建到临时路径（调试）
+REPORT_MOCK_ENABLED=1 ./machine_report.sh   # 演示数据，输出可复现
+REPORT_PROFILE=1 ./machine_report.sh >/dev/null   # 分阶段耗时（stderr）
+./install.sh --source ./machine_report.sh   # 安装到 ~/.local，注册 mreport
+```
 
 ## 一分钟了解架构
 
@@ -237,15 +291,7 @@ mr_register extras
 - 颜色：`src/core/00-bootstrap.sh` 的 `C_*`
 - 列宽上下限：`src/core/00-bootstrap.sh` 的 `NAME_MIN/MAX`、`DATA_MIN/MAX`
 
-### 分隔线速查
-
-| 写法 | 效果 | 场景 |
-| --- | --- | --- |
-| `mr_field 'A' 'v'` | 无分隔线 | 接在上一组里 |
-| `mr_field_break 'A' 'v'` | 上方实线 | 新的一组 |
-| `mr_field_dashed 'A' 'v'` | 上方虚线 | 同一组里的下一条 |
-| `mr_field 'A' 'v' 1` | 同 `mr_field_break` | 少写一行时用 |
-| `mr_field 'A' 'v' 2` | 同 `mr_field_dashed` | 少写一行时用 |
+分隔线怎么选，见上面的[速查表](#速查表)。
 
 ## handler 契约
 
