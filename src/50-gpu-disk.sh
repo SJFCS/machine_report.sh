@@ -106,12 +106,16 @@ collect_macos_gpu_rows() {
 # [HANDLER] collect_gpu_rows -> 输出 GPU 原始 TSV（字段契约同上）。
 # 只读取静态/上限频率，不查询实时 current clocks。
 # nvidia-smi 没有统一暴露 base clock，因此实时数据只显示 MAX 频率；
-# 演示数据则保留 base–boost 区间；仅开启 mock 时失败才使用 demo_gpu_rows。
+# 演示数据保留 base–boost 区间；mock 开启时整块用 demo_gpu_rows，不读硬件。
 # 用法：while IFS=$'\t' read -r name total used util min max; do ...; done
 #       < <(collect_gpu_rows)
 collect_gpu_rows() {
     local raw=''
     (( REPORT_GPU_ENABLED == 1 )) || return 0
+    if (( REPORT_MOCK_ENABLED == 1 )); then
+        demo_gpu_rows
+        return 0
+    fi
     if command -v nvidia-smi >/dev/null 2>&1; then
         if (( REPORT_GPU_TIMEOUT > 0 )) &&
             command -v timeout >/dev/null 2>&1; then
@@ -152,9 +156,6 @@ collect_gpu_rows() {
             printf '%s\n' "$raw"
             return
         fi
-    fi
-    if (( REPORT_MOCK_ENABLED == 1 )); then
-        demo_gpu_rows
     fi
 }
 
@@ -637,19 +638,18 @@ physical_disk_rows() {
     local usage percent used_h avail_h usage_details mount_details
     local smart_info smart_health smart_wear smart_err_label smart_err_count
 
+    # mock 开启时整块使用演示数据，不碰 lsblk/mount/smartctl。
+    if (( REPORT_MOCK_ENABLED == 1 )); then
+        demo_disk_rows
+        return 0
+    fi
+
     if [ "$platform_name" = Darwin ]; then
-        if (( REPORT_MOCK_ENABLED == 1 )); then
-            demo_disk_rows
-        else
-            collect_macos_disk_rows
-        fi
+        collect_macos_disk_rows
         return
     fi
 
     if ! command -v lsblk >/dev/null 2>&1; then
-        if (( REPORT_MOCK_ENABLED == 1 )); then
-            demo_disk_rows
-        fi
         return
     fi
 
