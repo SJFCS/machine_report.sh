@@ -5,23 +5,32 @@
 
 ## 目录
 
-- [一分钟了解架构](#一分钟了解架构)
-- [构建与产物](#构建与产物)
-- [快速开始：加一个 handler](#快速开始加一个-handler)
-- [handler 契约](#handler-契约)
-- [公开 API](#公开-api)
-- [数据流与生命周期](#数据流与生命周期)
-- [常用全局量](#常用全局量)
-- [改标题与页脚](#改标题与页脚)
-- [数据源（sources）](#数据源sources)
-- [编码约定](#编码约定)
-- [常见坑](#常见坑)
-- [性能](#性能)
-- [测试与自检](#测试与自检)
+- [开发文档](#开发文档)
+  - [目录](#目录)
+  - [一分钟了解架构](#一分钟了解架构)
+  - [快速开始：加一个 handler](#快速开始加一个-handler)
+  - [handler 契约](#handler-契约)
+  - [公开 API](#公开-api)
+    - [字段](#字段)
+    - [标题与页脚](#标题与页脚)
+    - [文本工具](#文本工具)
+  - [数据流与生命周期](#数据流与生命周期)
+  - [常用全局量](#常用全局量)
+  - [改标题与页脚](#改标题与页脚)
+  - [数据源（sources）](#数据源sources)
+  - [编码约定](#编码约定)
+  - [常见坑](#常见坑)
+    - [1. `set -u` + bash 3.2 的空数组](#1-set--u--bash-32-的空数组)
+    - [2. `local` 是动态作用域](#2-local-是动态作用域)
+    - [3. 宽度和颜色](#3-宽度和颜色)
+    - [4. `REPORT_PROFILE=1` 在 bash 3.2 下会变慢](#4-report_profile1-在-bash-32-下会变慢)
+    - [5. mock 与真实数据](#5-mock-与真实数据)
+  - [性能](#性能)
+  - [测试与自检](#测试与自检)
 
 ## 一分钟了解架构
 
-```
+```md
 src/
   core/       框架内核：宽度、数字、表格、布局、渲染、mr_* API
   sources/    纯数据采集：只输出文本或 TSV
@@ -38,6 +47,7 @@ build.sh      按 core → sources → handlers → main 合并成 machine_repor
 
 渲染流程：
 
+```md
 ```
 collect_shared_scalars()      # OS/CPU/负载/内存等共享标量
 collect_platform_session()    # 厂商/型号/UUID/locale/时区/登录信息
@@ -66,26 +76,26 @@ render_report()               # 画边框、居中、输出
 
 ## 快速开始：加一个 handler
 
-1. 新建 `src/handlers/70-mything.sh`：
+1. 新建 `src/handlers/70-mything.sh`
 
-```bash
-# shellcheck shell=bash
-#
-# 本文件绘制的行：EXAMPLE / EXAMPLE BAR
+  ```bash
+  # shellcheck shell=bash
+  #
+  # 本文件绘制的行：EXAMPLE / EXAMPLE BAR
 
-handler_mything() {
-    mr_field 'EXAMPLE' 'hello'
+  handler_mything() {
+      mr_field 'EXAMPLE' 'hello'
 
-    mr_field 'EXAMPLE BAR' ''
-    MY_BAR_ROW=$FIELD_INDEX      # 先占位，等列宽确定
-}
+      mr_field 'EXAMPLE BAR' ''
+      MY_BAR_ROW=$FIELD_INDEX      # 先占位，等列宽确定
+  }
 
-handler_mything_fill() {
-    mr_update "$MY_BAR_ROW" "$(mr_bar 42 100)"
-}
+  handler_mything_fill() {
+      mr_update "$MY_BAR_ROW" "$(mr_bar 42 100)"
+  }
 
-mr_register mything
-```
+  mr_register mything
+  ```
 
 2. `./build.sh`
 
@@ -99,11 +109,11 @@ mr_register mything
 
 每个 handler 最多三个函数，命名固定：
 
-| 函数 | 必需 | 时机 | 用途 |
-| --- | --- | --- | --- |
-| `handler_<name>()` | 是 | 所有 handler 依次执行 | 采集数据、`mr_field` 追加行 |
-| `handler_<name>_measure()` | 否 | `measure_fields` 之后、所有 fill 之前 | 撑宽 `DATA_W` |
-| `handler_<name>_fill()` | 否 | 所有 measure 之后 | 回填条形图/百分比 |
+| 函数                       | 必需 | 时机                                  | 用途                        |
+| -------------------------- | ---- | ------------------------------------- | --------------------------- |
+| `handler_<name>()`         | 是   | 所有 handler 依次执行                 | 采集数据、`mr_field` 追加行 |
+| `handler_<name>_measure()` | 否   | `measure_fields` 之后、所有 fill 之前 | 撑宽 `DATA_W`               |
+| `handler_<name>_fill()`    | 否   | 所有 measure 之后                     | 回填条形图/百分比           |
 
 `mr_register <name>` 决定注册顺序，也就是渲染顺序。文件名只影响注册顺序，
 可以用 `00-`、`10-` 这类前缀调整。
@@ -117,20 +127,20 @@ mr_register mything
 
 ### 字段
 
-| 函数 | 说明 |
-| --- | --- |
-| `mr_field LABEL VALUE [BREAK]` | 追加一行 |
-| `mr_field_break LABEL VALUE` | 追加一行并在上方画实线 |
-| `mr_field_dashed LABEL VALUE` | 追加一行并在上方画虚线 |
-| `mr_update INDEX VALUE` | 回填第 `INDEX` 行（用 `$FIELD_INDEX` 记住） |
+| 函数                           | 说明                                        |
+| ------------------------------ | ------------------------------------------- |
+| `mr_field LABEL VALUE [BREAK]` | 追加一行                                    |
+| `mr_field_break LABEL VALUE`   | 追加一行并在上方画实线                      |
+| `mr_field_dashed LABEL VALUE`  | 追加一行并在上方画虚线                      |
+| `mr_update INDEX VALUE`        | 回填第 `INDEX` 行（用 `$FIELD_INDEX` 记住） |
 
 值里可以带 ANSI 颜色和中文，宽度由框架计算。
 
 ### 标题与页脚
 
-| 函数 | 说明 |
-| --- | --- |
-| `mr_cover_line TEXT` | 表格上方加一行居中文字 |
+| 函数                  | 说明                   |
+| --------------------- | ---------------------- |
+| `mr_cover_line TEXT`  | 表格上方加一行居中文字 |
 | `mr_footer_line TEXT` | 表格下方加一行居中文字 |
 
 可以调用任意多次，写几行显示几行，注释掉就隐藏；文字超过表格宽度时
@@ -138,13 +148,13 @@ mr_register mything
 
 ### 文本工具
 
-| 函数 | 说明 |
-| --- | --- |
-| `mr_width TEXT` | 终端显示列数（中文/ANSI 安全） |
-| `mr_pad TEXT WIDTH` | 右补空格到指定显示宽度 |
-| `mr_fit TEXT WIDTH` | 超宽时截断并以 `…` 结尾 |
-| `mr_bar VALUE TOTAL [WIDTH]` | 百分比条；省略 `WIDTH` 时用 `DATA_W` |
-| `mr_percent_bar VALUE TOTAL PERCENT` | 百分比条 + 右侧百分比文本 |
+| 函数                                 | 说明                                 |
+| ------------------------------------ | ------------------------------------ |
+| `mr_width TEXT`                      | 终端显示列数（中文/ANSI 安全）       |
+| `mr_pad TEXT WIDTH`                  | 右补空格到指定显示宽度               |
+| `mr_fit TEXT WIDTH`                  | 超宽时截断并以 `…` 结尾              |
+| `mr_bar VALUE TOTAL [WIDTH]`         | 百分比条；省略 `WIDTH` 时用 `DATA_W` |
+| `mr_percent_bar VALUE TOTAL PERCENT` | 百分比条 + 右侧百分比文本            |
 
 ## 数据流与生命周期
 
@@ -163,15 +173,15 @@ mr_register mything
 
 ## 常用全局量
 
-| 变量 | 含义 |
-| --- | --- |
-| `FIELD_LABELS` / `FIELD_VALUES` / `FIELD_BREAK_BEFORE` | 字段数组 |
-| `FIELD_INDEX` | 最近一次 `mr_field` 的行号 |
-| `NAME_W` / `DATA_W` | 左右两列内容宽度（`measure_fields` 之后有效） |
-| `DATA_MAX` / `NAME_MAX` | 列宽上限，超长字段名会被截断 |
-| `C_*` | ANSI 颜色，见 `core/00-bootstrap.sh` |
-| `HORIZONTAL` / `DASHED_HORIZONTAL` / `TOP_LEFT` … | 边框字符 |
-| `REPORT_MOCK_ENABLED` / `REPORT_PROFILE` / `REPORT_GPU_ENABLED` / `REPORT_SMART_ENABLED` | 运行开关 |
+| 变量                                                                                     | 含义                                          |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `FIELD_LABELS` / `FIELD_VALUES` / `FIELD_BREAK_BEFORE`                                   | 字段数组                                      |
+| `FIELD_INDEX`                                                                            | 最近一次 `mr_field` 的行号                    |
+| `NAME_W` / `DATA_W`                                                                      | 左右两列内容宽度（`measure_fields` 之后有效） |
+| `DATA_MAX` / `NAME_MAX`                                                                  | 列宽上限，超长字段名会被截断                  |
+| `C_*`                                                                                    | ANSI 颜色，见 `core/00-bootstrap.sh`          |
+| `HORIZONTAL` / `DASHED_HORIZONTAL` / `TOP_LEFT` …                                        | 边框字符                                      |
+| `REPORT_MOCK_ENABLED` / `REPORT_PROFILE` / `REPORT_GPU_ENABLED` / `REPORT_SMART_ENABLED` | 运行开关                                      |
 
 ## 改标题与页脚
 
@@ -195,10 +205,10 @@ mr_cover_line "${C_TITLE}${REPORT_TITLE}${C_RESET}"
 
 ## 数据源（sources）
 
-| 文件 | 提供 |
-| --- | --- |
-| `system.sh` | mock 标量、OS、CPU、负载、运行时间、内存 |
-| `platform.sh` | 厂商/型号/UUID、locale/时区/登录用户、网卡、DNS |
+| 文件          | 提供                                                 |
+| ------------- | ---------------------------------------------------- |
+| `system.sh`   | mock 标量、OS、CPU、负载、运行时间、内存             |
+| `platform.sh` | 厂商/型号/UUID、locale/时区/登录用户、网卡、DNS      |
 | `gpu-disk.sh` | `collect_gpu_rows`、`physical_disk_rows`、SMART 解析 |
 
 约定：
