@@ -336,16 +336,16 @@ mr_register extras
 
 ## 常用全局量
 
-| 变量                                                                                     | 含义                                          |
-| ---------------------------------------------------------------------------------------- | --------------------------------------------- |
-| `FIELD_LABELS` / `FIELD_VALUES` / `FIELD_BREAK_BEFORE`                                   | 字段数组                                      |
-| `FIELD_INDEX`                                                                            | 最近一次 `mr_field` 的行号                    |
-| `NAME_W` / `DATA_W`                                                                      | 左右两列内容宽度（`measure_fields` 之后有效） |
-| `DATA_MAX` / `NAME_MAX`                                                                  | 列宽上限，超长字段名会被截断                  |
-| `C_*`                                                                                    | ANSI 颜色，见 `core/00-bootstrap.sh`          |
-| `HORIZONTAL` / `DASHED_HORIZONTAL` / `TOP_LEFT` …                                        | 边框字符                                      |
-| `REPORT_MOCK_ENABLED` / `REPORT_PROFILE` / `REPORT_GPU_ENABLED` / `REPORT_SMART_ENABLED` / `REPORT_NTP_ENABLED` | 运行开关 |
-| `REPORT_GPU_TIMEOUT` / `REPORT_SMART_TIMEOUT` / `REPORT_NTP_TIMEOUT` | 外部命令超时秒数；`0` 表示不限时 |
+| 变量                                                                                                            | 含义                                          |
+| --------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `FIELD_LABELS` / `FIELD_VALUES` / `FIELD_BREAK_BEFORE`                                                          | 字段数组                                      |
+| `FIELD_INDEX`                                                                                                   | 最近一次 `mr_field` 的行号                    |
+| `NAME_W` / `DATA_W`                                                                                             | 左右两列内容宽度（`measure_fields` 之后有效） |
+| `DATA_MAX` / `NAME_MAX`                                                                                         | 列宽上限，超长字段名会被截断                  |
+| `C_*`                                                                                                           | ANSI 颜色，见 `core/00-bootstrap.sh`          |
+| `HORIZONTAL` / `DASHED_HORIZONTAL` / `TOP_LEFT` …                                                               | 边框字符                                      |
+| `REPORT_MOCK_ENABLED` / `REPORT_PROFILE` / `REPORT_GPU_ENABLED` / `REPORT_SMART_ENABLED` / `REPORT_NTP_ENABLED` | 运行开关                                      |
+| `REPORT_GPU_TIMEOUT` / `REPORT_SMART_TIMEOUT` / `REPORT_NTP_TIMEOUT`                                            | 外部命令超时秒数；`0` 表示不限时              |
 
 ## 改标题与页脚
 
@@ -353,7 +353,7 @@ mr_register extras
 
 ```bash
 REPORT_TITLE=${REPORT_TITLE-'服务器运行报告'}
-REPORT_SUBTITLE=${REPORT_SUBTITLE-'PVE Platform'}
+REPORT_SUBTITLE=${REPORT_SUBTITLE-'OPS Platform'}
 REPORT_ENVIRONMENT=${REPORT_ENVIRONMENT-'PRODUCTION'}
 
 mr_cover_line "${C_TITLE}${REPORT_TITLE}${C_RESET}"

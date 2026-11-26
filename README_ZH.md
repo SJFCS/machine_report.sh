@@ -51,7 +51,7 @@ cd machine_report.sh
 | `NO_COLOR`             | 未设置                    | 设置后关闭颜色                             |
 | `FORCE_COLOR`          | 未设置                    | 设置后即使输出到管道也保留颜色             |
 | `REPORT_TITLE`         | `SERVER OPERATION REPORT` | 封面标题；传空串可隐藏                     |
-| `REPORT_SUBTITLE`      | `PVE Platform`            | 封面副标题；传空串可隐藏                   |
+| `REPORT_SUBTITLE`      | `OPS Platform`            | 封面副标题；传空串可隐藏                   |
 | `REPORT_ENVIRONMENT`   | `PRODUCTION`              | 页脚环境标签                               |
 
 ```bash
@@ -119,17 +119,17 @@ macOS 默认环境即可运行，Apple Silicon 的 GPU 利用率和统一内存�
 
 其他可选工具缺失时，对应字段也会降级显示：
 
-| 工具                  | 提供的数据                   | 缺失时                                   |
-| --------------------- | ---------------------------- | ---------------------------------------- |
-| `lsblk`               | Linux 物理磁盘、分区和挂载点 | 不输出物理磁盘行                         |
-| `ip`                  | IPv4 网卡和主 IP             | 不输出网卡行                             |
-| `lscpu`               | Linux CPU 型号和频率         | 回退读取 `/proc/cpuinfo`                 |
-| `dmidecode`           | DMI 厂商、型号和 UUID        | 对应字段显示 `UNKNOWN`，通常需要 root    |
-| `systemd-detect-virt` | 虚拟化类型                   | 回退 DMI 信息                            |
-| `timedatectl`         | IANA 时区名称                | 回退 `/etc/timezone` 或 `/etc/localtime` |
-| `resolvectl`          | 上游 DNS                     | 回退读取 `/etc/resolv.conf`              |
-| `chronyc` / `timedatectl` / `ntpq` / `ntpstat` | Linux NTP 状态、地址和偏移 | 自动尝试下一个可用的 NTP 工具 |
-| `sntp`                | macOS 时钟偏移和解析后的服务器地址 | 有 `systemsetup` 时仍显示状态/地址；偏移显示 `-` |
+| 工具                                           | 提供的数据                         | 缺失时                                           |
+| ---------------------------------------------- | ---------------------------------- | ------------------------------------------------ |
+| `lsblk`                                        | Linux 物理磁盘、分区和挂载点       | 不输出物理磁盘行                                 |
+| `ip`                                           | IPv4 网卡和主 IP                   | 不输出网卡行                                     |
+| `lscpu`                                        | Linux CPU 型号和频率               | 回退读取 `/proc/cpuinfo`                         |
+| `dmidecode`                                    | DMI 厂商、型号和 UUID              | 对应字段显示 `UNKNOWN`，通常需要 root            |
+| `systemd-detect-virt`                          | 虚拟化类型                         | 回退 DMI 信息                                    |
+| `timedatectl`                                  | IANA 时区名称                      | 回退 `/etc/timezone` 或 `/etc/localtime`         |
+| `resolvectl`                                   | 上游 DNS                           | 回退读取 `/etc/resolv.conf`                      |
+| `chronyc` / `timedatectl` / `ntpq` / `ntpstat` | Linux NTP 状态、地址和偏移         | 自动尝试下一个可用的 NTP 工具                    |
+| `sntp`                                         | macOS 时钟偏移和解析后的服务器地址 | 有 `systemsetup` 时仍显示状态/地址；偏移显示 `-` |
 
 常见发行版安装：
 
@@ -177,11 +177,11 @@ NTP SERVER │ time.cloudflare.com (162.159.200.1)
 NTP OFFSET │ +0.284 ms
 ```
 
-| 字段       | 含义                                                         |
-| ---------- | ------------------------------------------------------------ |
-| `STATUS`   | `SYNCED` 表示时间服务已正常同步；`UNSYNCED` 表示服务在运行但未同步；`DISABLED` 表示已关闭采集；`UNKNOWN` 表示没有可用工具能判断状态 |
-| `SERVER`   | 当前使用或配置的 NTP 服务器；未获取到时显示 `-`              |
-| `OFFSET`   | 当前 NTP 工具报告的时钟偏移，统一换算为毫秒；正负方向沿用该工具的定义；不可用时显示 `-` |
+| 字段     | 含义                                                                                                                                |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `STATUS` | `SYNCED` 表示时间服务已正常同步；`UNSYNCED` 表示服务在运行但未同步；`DISABLED` 表示已关闭采集；`UNKNOWN` 表示没有可用工具能判断状态 |
+| `SERVER` | 当前使用或配置的 NTP 服务器；未获取到时显示 `-`                                                                                     |
+| `OFFSET` | 当前 NTP 工具报告的时钟偏移，统一换算为毫秒；正负方向沿用该工具的定义；不可用时显示 `-`                                             |
 
 Linux 会依次尝试 `chronyc`、`timedatectl`、`ntpq`、`ntpstat`，取第一个
 返回有效数据的来源，再回退到配置文件和 `timedatectl` 的同步标志。macOS

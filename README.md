@@ -42,21 +42,21 @@ cd machine_report.sh
 Configuration is provided through environment variables. Boolean switches
 accept `0/1`, `true/false`, `yes/no`, and `on/off`.
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `REPORT_MOCK_ENABLED` | `0` | Set to `1` to use built-in demo GPU, disk, and scalar data |
-| `REPORT_PROFILE` | `0` | Set to `1` to write stage timings to stderr |
-| `REPORT_GPU_ENABLED` | `1` | Set to `0` to skip GPU collection |
-| `REPORT_GPU_TIMEOUT` | `1` | Timeout in seconds for one `nvidia-smi` call; `0` disables the limit |
-| `REPORT_SMART_ENABLED` | `1` | Set to `0` to skip SMART collection |
-| `REPORT_SMART_TIMEOUT` | `2` | SMART timeout in seconds per disk; `0` disables the limit |
-| `REPORT_NTP_ENABLED` | `1` | Set to `0` to skip NTP collection |
-| `REPORT_NTP_TIMEOUT` | `1` | macOS `sntp` query timeout in seconds; `0` disables the limit |
-| `NO_COLOR` | Unset | Disable ANSI colors when set |
-| `FORCE_COLOR` | Unset | Keep colors even when output is piped |
-| `REPORT_TITLE` | `SERVER OPERATION REPORT` | Cover title; set to an empty string to hide it |
-| `REPORT_SUBTITLE` | `PVE Platform` | Cover subtitle; set to an empty string to hide it |
-| `REPORT_ENVIRONMENT` | `PRODUCTION` | Footer environment label |
+| Variable               | Default                   | Description                                                          |
+| ---------------------- | ------------------------- | -------------------------------------------------------------------- |
+| `REPORT_MOCK_ENABLED`  | `0`                       | Set to `1` to use built-in demo GPU, disk, and scalar data           |
+| `REPORT_PROFILE`       | `0`                       | Set to `1` to write stage timings to stderr                          |
+| `REPORT_GPU_ENABLED`   | `1`                       | Set to `0` to skip GPU collection                                    |
+| `REPORT_GPU_TIMEOUT`   | `1`                       | Timeout in seconds for one `nvidia-smi` call; `0` disables the limit |
+| `REPORT_SMART_ENABLED` | `1`                       | Set to `0` to skip SMART collection                                  |
+| `REPORT_SMART_TIMEOUT` | `2`                       | SMART timeout in seconds per disk; `0` disables the limit            |
+| `REPORT_NTP_ENABLED`   | `1`                       | Set to `0` to skip NTP collection                                    |
+| `REPORT_NTP_TIMEOUT`   | `1`                       | macOS `sntp` query timeout in seconds; `0` disables the limit        |
+| `NO_COLOR`             | Unset                     | Disable ANSI colors when set                                         |
+| `FORCE_COLOR`          | Unset                     | Keep colors even when output is piped                                |
+| `REPORT_TITLE`         | `SERVER OPERATION REPORT` | Cover title; set to an empty string to hide it                       |
+| `REPORT_SUBTITLE`      | `OPS Platform`            | Cover subtitle; set to an empty string to hide it                    |
+| `REPORT_ENVIRONMENT`   | `PRODUCTION`              | Footer environment label                                             |
 
 Common examples:
 
@@ -104,12 +104,12 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/SJFCS/machine_report.sh
 
 Required at runtime:
 
-| Dependency | Requirement | Purpose |
-| --- | --- | --- |
-| Bash | 3.2+ | Runs the report; also required when the login shell is zsh |
-| awk | POSIX awk | Parses GPU, disk, and memory output |
-| Perl | 5 | Calculates UTF-8/ANSI display widths and renders the table |
-| Basic tools | `sed`, `tr`, `date`, `uname`, `hostname`, `who`, `df`, and similar | Used for system information collection and installation |
+| Dependency  | Requirement                                                        | Purpose                                                    |
+| ----------- | ------------------------------------------------------------------ | ---------------------------------------------------------- |
+| Bash        | 3.2+                                                               | Runs the report; also required when the login shell is zsh |
+| awk         | POSIX awk                                                          | Parses GPU, disk, and memory output                        |
+| Perl        | 5                                                                  | Calculates UTF-8/ANSI display widths and renders the table |
+| Basic tools | `sed`, `tr`, `date`, `uname`, `hostname`, `who`, `df`, and similar | Used for system information collection and installation    |
 
 Complete Linux collection also relies on `/proc`, `/sys`, util-linux, iproute2,
 and coreutils. macOS works with the default system environment; Apple Silicon
@@ -123,24 +123,24 @@ follow a `SUM CORES` row and global load averages, grouped under each
 
 Recommended for complete collection:
 
-| Dependency | Provided data | When missing |
-| --- | --- | --- |
-| `nvidia-smi` | NVIDIA GPU model, memory, and utilization | Shows `GPU -` |
-| `smartctl` (`smartmontools`) | Disk SMART health, wear, and error counters | Shows `N/A` |
+| Dependency                   | Provided data                               | When missing  |
+| ---------------------------- | ------------------------------------------- | ------------- |
+| `nvidia-smi`                 | NVIDIA GPU model, memory, and utilization   | Shows `GPU -` |
+| `smartctl` (`smartmontools`) | Disk SMART health, wear, and error counters | Shows `N/A`   |
 
 Other optional tools degrade individual fields when missing:
 
-| Tool | Provided data | When missing |
-| --- | --- | --- |
-| `lsblk` | Linux physical disks, partitions, and mount points | No physical disk rows |
-| `ip` | IPv4 interfaces and primary IP | No network interface rows |
-| `lscpu` | Linux CPU model and frequency | Falls back to `/proc/cpuinfo` |
-| `dmidecode` | DMI vendor, model, and UUID | Shows `UNKNOWN`; usually requires root |
-| `systemd-detect-virt` | Virtualization type | Falls back to DMI information |
-| `timedatectl` | IANA time zone name | Falls back to `/etc/timezone` or `/etc/localtime` |
-| `resolvectl` | Upstream DNS servers | Falls back to `/etc/resolv.conf` |
-| `chronyc` / `timedatectl` / `ntpq` / `ntpstat` | Linux NTP status, server, and offset | Uses the next available NTP tool |
-| `sntp` | macOS clock offset and resolved server address | Status/server come from `systemsetup` when available; offset shows `-` |
+| Tool                                           | Provided data                                      | When missing                                                           |
+| ---------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
+| `lsblk`                                        | Linux physical disks, partitions, and mount points | No physical disk rows                                                  |
+| `ip`                                           | IPv4 interfaces and primary IP                     | No network interface rows                                              |
+| `lscpu`                                        | Linux CPU model and frequency                      | Falls back to `/proc/cpuinfo`                                          |
+| `dmidecode`                                    | DMI vendor, model, and UUID                        | Shows `UNKNOWN`; usually requires root                                 |
+| `systemd-detect-virt`                          | Virtualization type                                | Falls back to DMI information                                          |
+| `timedatectl`                                  | IANA time zone name                                | Falls back to `/etc/timezone` or `/etc/localtime`                      |
+| `resolvectl`                                   | Upstream DNS servers                               | Falls back to `/etc/resolv.conf`                                       |
+| `chronyc` / `timedatectl` / `ntpq` / `ntpstat` | Linux NTP status, server, and offset               | Uses the next available NTP tool                                       |
+| `sntp`                                         | macOS clock offset and resolved server address     | Status/server come from `systemsetup` when available; offset shows `-` |
 
 Install dependencies by distribution:
 
@@ -170,12 +170,12 @@ SMART │ HEALTH PASSED · WEAR 4% · INTEG 0
 SMART │ HEALTH PASSED · WEAR 4% · CRC 0
 ```
 
-| Field | Meaning |
-| --- | --- |
+| Field    | Meaning                                                                                        |
+| -------- | ---------------------------------------------------------------------------------------------- |
 | `HEALTH` | Vendor health self-assessment; `PASSED`/`OK` is healthy, `FAILED` indicates a possible failure |
-| `WEAR` | Percentage of rated life consumed; lower is better; HDDs usually show `-` |
-| `INTEG` | NVMe media/data integrity error count; `0` is normal |
-| `CRC` | SATA/SAS link CRC error count; `0` is normal |
+| `WEAR`   | Percentage of rated life consumed; lower is better; HDDs usually show `-`                      |
+| `INTEG`  | NVMe media/data integrity error count; `0` is normal                                           |
+| `CRC`    | SATA/SAS link CRC error count; `0` is normal                                                   |
 
 `N/A` or `-` usually means the metric is unavailable because of missing
 permissions or tools, a disk in standby, or a device that does not expose it.
@@ -190,11 +190,11 @@ NTP SERVER │ time.cloudflare.com (162.159.200.1)
 NTP OFFSET │ +0.284 ms
 ```
 
-| Field | Meaning |
-| --- | --- |
+| Field    | Meaning                                                                                                                                                                                                                      |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `STATUS` | `SYNCED` means the time service reports a valid synchronization; `UNSYNCED` means it is running but not synchronized; `DISABLED` means collection is turned off; `UNKNOWN` means no supported tool could determine the state |
-| `SERVER` | Active or configured NTP server; `-` when it was not reported |
-| `OFFSET` | Clock difference reported by the active NTP tool, converted to milliseconds; the sign convention follows that tool; `-` when unavailable |
+| `SERVER` | Active or configured NTP server; `-` when it was not reported                                                                                                                                                                |
+| `OFFSET` | Clock difference reported by the active NTP tool, converted to milliseconds; the sign convention follows that tool; `-` when unavailable                                                                                     |
 
 Linux uses the first available source that returns usable data from `chronyc`,
 `timedatectl`, `ntpq`, and `ntpstat`, then falls back to configuration files
